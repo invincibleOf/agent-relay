@@ -56,6 +56,9 @@ providers:
   opencode:
     command: opencode
     args: ["acp"]
+    # Credenciales: `opencode auth login` en esta máquina.
     env: {}
     skillsDirs: [".opencode/skills"]
-    toolBridge: { enabled: true, preset: none }
+    # Desactiva read/write/edit/bash/grep/glob internos de OpenCode y pide
+    # permiso para write, edit y bash del puente.
+    toolBridge: { enabled: true, preset: opencode }

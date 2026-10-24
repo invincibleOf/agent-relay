@@ -35,7 +35,7 @@ const Provider = z.object({
     .object({
       enabled: z.boolean().default(true),
       /** Cómo desactivar las herramientas internas del agente ("none" = no tocarlas). */
-      preset: z.enum(["claude-code", "none"]).default("none"),
+      preset: z.enum(["claude-code", "opencode", "none"]).default("none"),
       /** `_meta` adicional que se mezcla en session/new, load y resume. */
       sessionMeta: z.record(z.string(), z.unknown()).default({}),
     })

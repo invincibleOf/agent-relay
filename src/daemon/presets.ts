@@ -4,6 +4,9 @@
  * en el daemon.
  */
 
+import { mkdirSync, writeFileSync } from "node:fs";
+import path from "node:path";
+
 export const BRIDGE_SERVER_NAME = "relay";
 
 /** Herramientas del puente que no modifican nada (se pueden aprobar solas). */
@@ -12,7 +15,45 @@ export const READ_ONLY_TOOLS = ["read", "grep", "glob"] as const;
 export const BRIDGE_INSTRUCTIONS = `The user's project lives on a different machine than the one you run on. Your working directory is only a mirror that holds AGENTS.md and the project's skills; the real source files are not there.
 Use the tools of the "${BRIDGE_SERVER_NAME}" MCP server for every file and shell operation: read, write, edit, grep, glob and bash. They act on the user's real project. Paths may be absolute (under your working directory) or relative to it; they are mapped to the user's project automatically.`;
 
-export type PresetName = "claude-code" | "none";
+export type PresetName = "claude-code" | "opencode" | "none";
+
+/** Herramientas internas de OpenCode que tocan disco o shell. */
+const OPENCODE_BUILTIN_TOOLS = ["bash", "read", "write", "edit", "multiedit", "patch", "apply_patch", "grep", "glob", "list"];
+/** Herramientas del puente que modifican algo: OpenCode debe pedir permiso. */
+const MUTATING_TOOLS = ["write", "edit", "bash"];
+
+/**
+ * Variables de entorno para el proceso del agente. Para OpenCode, que no lee
+ * `_meta` de ACP, el preset viaja como OPENCODE_CONFIG_CONTENT (configuración
+ * en línea que se mezcla sobre la del proyecto y la global).
+ */
+export function presetSpawnEnv(
+  preset: PresetName,
+  remoteRoot: string,
+  env: Record<string, string | undefined>,
+): Record<string, string> {
+  if (preset !== "opencode") return {};
+
+  const instructionsFile = path.join(remoteRoot, ".relay", "bridge-instructions.md");
+  mkdirSync(path.dirname(instructionsFile), { recursive: true });
+  writeFileSync(instructionsFile, `# agent-relay\n\n${BRIDGE_INSTRUCTIONS}\n`);
+
+  const presetConfig = {
+    tools: Object.fromEntries(OPENCODE_BUILTIN_TOOLS.map((t) => [t, false])),
+    permission: Object.fromEntries(MUTATING_TOOLS.map((t) => [`${BRIDGE_SERVER_NAME}_${t}`, "ask"])),
+    instructions: [instructionsFile],
+  };
+
+  let userConfig: unknown = {};
+  if (env.OPENCODE_CONFIG_CONTENT) {
+    try {
+      userConfig = JSON.parse(env.OPENCODE_CONFIG_CONTENT);
+    } catch {
+      throw new Error("OPENCODE_CONFIG_CONTENT del proveedor no es JSON válido");
+    }
+  }
+  return { OPENCODE_CONFIG_CONTENT: JSON.stringify(deepMerge(userConfig, presetConfig)) };
+}
 
 /** `_meta` que se mezcla en session/new, session/load y session/resume. */
 export function presetSessionMeta(preset: PresetName): Record<string, unknown> {
@@ -44,6 +85,7 @@ export function presetSessionMeta(preset: PresetName): Record<string, unknown> {
           },
         },
       };
+    case "opencode": // OpenCode se configura por entorno (presetSpawnEnv)
     case "none":
       return {};
   }

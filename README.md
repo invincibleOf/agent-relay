@@ -39,15 +39,52 @@ Las rutas se traducen en ambos sentidos, así que el agente sigue viendo su work
 |---|---|
 | Claude Code (`claude-agent-acp`) | **Verificado** con el preset `claude-code`: lectura, escritura, comandos y búsquedas ocurren en tu máquina. |
 | Codex (`codex-acp`) | El handshake funciona. Las herramientas del puente se ofrecen, pero aún no hay preset para desactivar el shell interno de Codex, así que puede seguir usándolo en la remota. |
-| OpenCode (`opencode acp`) | Sin verificar. Sus herramientas internas se pueden desactivar con `tools` en su configuración. |
+| OpenCode (`opencode acp`) | **Verificado** con el preset `opencode` (OpenCode 1.19, usando un modelo de prueba): sus herramientas internas de archivos y shell se desactivan, solo quedan las del puente, y pide permiso antes de `write`, `edit` y `bash`. |
 
-`grep` y `glob` usan [ripgrep](https://github.com/BurntSushi/ripgrep) si está instalado en tu máquina (respeta `.gitignore`); si no, `grep` y `find`. Con un cliente Windows, por ahora solo `read`, `write`, `edit` y `bash` (con `cmd.exe`).
+`grep` y `glob` se ejecutan en **la máquina del CLI** (tu computador), así que es ahí donde conviene instalar [ripgrep](https://github.com/BurntSushi/ripgrep): es más rápido y respeta `.gitignore`. Si no está, se usan `grep` y `find`. En la remota no hace falta. Con un cliente Windows, por ahora solo `read`, `write`, `edit` y `bash` (con `cmd.exe`).
 
 ## Requisitos
 
 - Node.js 20 o superior en ambas máquinas.
 - En la remota: el adaptador ACP de cada proveedor y su login hecho **allí** (`claude` → `/login`, `codex login`, `opencode auth login`).
+- En tu máquina (recomendado): `ripgrep` (`brew install ripgrep`, `sudo apt install ripgrep` o `winget install BurntSushi.ripgrep.MSVC`).
 - Recomendado: [Tailscale](https://tailscale.com) o [Headscale](https://github.com/juanfont/headscale) (100 % self-hosted) en ambas máquinas.
+
+## Prueba real en 10 minutos
+
+Puedes probarlo primero con el daemon y el CLI en **la misma máquina**, y después separarlos.
+
+**1. Instala y compila** (en la máquina que hará de remota):
+
+```bash
+git clone https://github.com/invincibleOf/agent-relay && cd agent-relay
+npm install && npm run build && npm link
+```
+
+**2. Prepara un proveedor en esa máquina.** Por ejemplo OpenCode: `npm i -g opencode-ai` y `opencode auth login` (o usa sus modelos gratuitos). Para Claude Code: instala `claude`, haz `/login` y el daemon usará `npx -y @agentclientprotocol/claude-agent-acp`.
+
+**3. Configura y arranca el daemon:**
+
+```bash
+relay-daemon gen-token                      # copia el token y el hash
+mkdir -p ~/.config/agent-relay
+cp examples/daemon.yaml ~/.config/agent-relay/daemon.yaml
+# Edita: listen.host = 127.0.0.1 para la prueba local, pega el hash en auth.tokenSha256
+relay-daemon check && relay-daemon
+```
+
+**4. En otra terminal, desde cualquier proyecto:**
+
+```bash
+cd ~/algun-proyecto
+export RELAY_URL=ws://127.0.0.1:7443/acp RELAY_TOKEN='relay_…'
+relay doctor -a opencode                    # o -a claude
+relay -a opencode
+```
+
+Pídele algo como *"lee el README, crea notas.txt con un resumen y ejecuta ls"*. Verás líneas `⌂ local lee/escribe/ejecuta` y el archivo aparecerá en tu proyecto.
+
+**5. Separa las máquinas.** Instala Tailscale en ambas, cambia `listen.host` a la IP de Tailscale de la remota y `RELAY_URL` a `ws://<esa-ip>:7443/acp`. En la máquina local solo necesitas el CLI (pasos 1 y 4).
 
 ## Instalación
 
@@ -146,7 +183,7 @@ mi-proyecto/
 - **TLS/mTLS**: opcional, TLS 1.3 mínimo; con `clientCa` se exige certificado de cliente.
 - **Archivos locales**: el CLI solo permite leer, escribir y ejecutar dentro de la raíz del proyecto (y de `permissions.extraRoots`). Todo lo demás se rechaza.
 - **Puente MCP**: escucha solo en `127.0.0.1` de la remota, con una URL secreta distinta por sesión que se invalida al cerrar la conexión.
-- **Permisos**: el preset `claude-code` aprueba solas las herramientas de solo lectura (`read`, `grep`, `glob`); `write`, `edit` y `bash` siguen el flujo de permisos. Por defecto el CLI pregunta antes de cada acción que el agente marque como sensible; en modo `-p` sin `--yes`, se rechazan.
+- **Permisos**: con los presets `claude-code` y `opencode`, las herramientas de solo lectura (`read`, `grep`, `glob`) se aprueban solas; `write`, `edit` y `bash` siguen el flujo de permisos. Por defecto el CLI pregunta antes de cada acción que el agente marque como sensible; en modo `-p` sin `--yes`, se rechazan.
 - **Workspace espejo**: las rutas que llegan del CLI se validan (nada absoluto ni con `..`) antes de escribirse en el daemon.
 
 ## Desarrollo
@@ -186,7 +223,7 @@ test/
 ## Hoja de ruta
 
 1. ~~Puente MCP de herramientas locales~~ (v0.2).
-2. Presets para Codex y OpenCode que desactiven sus herramientas internas.
+2. Preset para Codex que desactive su shell interno.
 3. Reconexión y reanudación de sesiones (`session/load`).
 4. Sincronización en vivo de `AGENTS.md` y `.agents/` cuando cambian durante la sesión.
 5. Instalador como servicio (`systemd`/`launchd`) para el daemon.

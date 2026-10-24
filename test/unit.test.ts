@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { expandTemplate } from "../src/cli/commands.ts";
 import { displayCommand } from "../src/cli/local-tools.ts";
-import { deepMerge, presetSessionMeta } from "../src/daemon/presets.ts";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { deepMerge, presetSessionMeta, presetSpawnEnv } from "../src/daemon/presets.ts";
 import { safeRelativePath } from "../src/daemon/workspace.ts";
 import { rewritePathPrefix } from "../src/shared/protocol.ts";
 
@@ -47,6 +50,25 @@ test("deepMerge mezcla _meta del cliente con el preset", () => {
   assert.ok(merged.claudeCode.options.disallowedTools.includes("Bash"));
   assert.match(merged.systemPrompt.append, /relay/);
   assert.deepEqual(presetSessionMeta("none"), {});
+});
+
+test("presetSpawnEnv de OpenCode desactiva herramientas internas y conserva la config del usuario", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "relay-preset-"));
+  try {
+    const env = presetSpawnEnv("opencode", root, { OPENCODE_CONFIG_CONTENT: JSON.stringify({ model: "x/y", tools: { webfetch: false } }) });
+    const cfg = JSON.parse(env.OPENCODE_CONFIG_CONTENT);
+    assert.equal(cfg.model, "x/y");
+    assert.equal(cfg.tools.webfetch, false);
+    for (const t of ["bash", "read", "write", "edit", "grep", "glob"]) assert.equal(cfg.tools[t], false, t);
+    assert.equal(cfg.permission.relay_bash, "ask");
+    assert.equal(cfg.permission.relay_write, "ask");
+    assert.equal(cfg.permission.relay_read, undefined);
+    assert.match(readFileSync(cfg.instructions[0], "utf8"), /relay/);
+    assert.deepEqual(presetSpawnEnv("claude-code", root, {}), {});
+    assert.throws(() => presetSpawnEnv("opencode", root, { OPENCODE_CONFIG_CONTENT: "{no-json" }));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("displayCommand muestra el comando sin el envoltorio del shell", () => {

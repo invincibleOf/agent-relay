@@ -3,7 +3,7 @@ import { createInterface } from "node:readline";
 import type { WebSocket } from "ws";
 import { rewritePathPrefix } from "../shared/protocol.js";
 import type { ProviderConfig } from "./config.js";
-import { BRIDGE_SERVER_NAME, deepMerge, presetSessionMeta } from "./presets.js";
+import { BRIDGE_SERVER_NAME, deepMerge, presetSessionMeta, presetSpawnEnv } from "./presets.js";
 import type { ClientRequester, ToolBridgeHub } from "./tool-bridge.js";
 
 const CLIENT_REQUEST_TIMEOUT_MS = 120_000;
@@ -66,9 +66,11 @@ function deferred<T>(): Deferred<T> {
 export function bridgeSession(opts: BridgeOptions): ChildProcessWithoutNullStreams {
   const { ws, provider, providerName, remoteRoot, localRoot, localSep, hub, log } = opts;
 
+  const baseEnv = { ...process.env, ...provider.env };
+  const presetEnv = provider.toolBridge.enabled ? presetSpawnEnv(provider.toolBridge.preset, remoteRoot, baseEnv) : {};
   const child = spawn(provider.command, provider.args, {
     cwd: remoteRoot,
-    env: { ...process.env, ...provider.env },
+    env: { ...baseEnv, ...presetEnv },
     stdio: ["pipe", "pipe", "pipe"],
   });
   log(`agente "${providerName}" iniciado (pid ${child.pid}) en ${remoteRoot}`);
