@@ -11,15 +11,64 @@ import { Readable, Writable } from "node:stream";
 import { PROTOCOL_VERSION, agent, methods, ndJsonStream } from "@agentclientprotocol/sdk";
 
 let sessionCwd = "";
+let mcpUrl: string | undefined;
+let sessionMeta: Record<string, unknown> = {};
+
+/** Cliente MCP mínimo (Streamable HTTP, respuestas JSON) para probar el puente. */
+let mcpId = 0;
+async function mcp(method: string, params: Record<string, unknown> = {}) {
+  const res = await fetch(mcpUrl!, {
+    method: "POST",
+    headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: ++mcpId, method, params }),
+  });
+  const body = (await res.json()) as { result?: any; error?: { message: string } };
+  if (body.error) throw new Error(body.error.message);
+  return body.result;
+}
+async function tool(name: string, args: Record<string, unknown>) {
+  const r = await mcp("tools/call", { name, arguments: args });
+  return { text: (r.content as Array<{ text: string }>).map((c) => c.text).join(""), isError: r.isError === true };
+}
+
+async function bridgeReport(): Promise<string[]> {
+  const out: string[] = [];
+  const meta = sessionMeta as { claudeCode?: { options?: { disallowedTools?: string[]; allowedTools?: string[] } } };
+  out.push(`MCP_URL=${mcpUrl ? new URL(mcpUrl).hostname : "no"}`);
+  out.push(`DISALLOWED_READ=${meta.claudeCode?.options?.disallowedTools?.includes("Read") ? "si" : "no"}`);
+  out.push(`ALLOWED=${(meta.claudeCode?.options?.allowedTools ?? []).join(",")}`);
+  if (!mcpUrl) return out;
+
+  await mcp("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "fake", version: "0" } });
+  const tools = await mcp("tools/list");
+  out.push(`TOOLS=${(tools.tools as Array<{ name: string }>).map((t) => t.name).sort().join(",")}`);
+
+  // Ruta relativa y ruta absoluta del espejo: ambas deben llegar al disco local.
+  out.push(`B_READ=${JSON.stringify((await tool("read", { path: "README.md" })).text)}`);
+  out.push(`B_READ_ABS=${JSON.stringify((await tool("read", { path: path.join(sessionCwd, "README.md") })).text)}`);
+  out.push(`B_WRITE=${(await tool("write", { path: "src/nuevo.ts", content: "export const a = 1;\nexport const b = 1;\n" })).isError ? "error" : "ok"}`);
+  out.push(`B_EDIT_AMBIGUO=${(await tool("edit", { path: "src/nuevo.ts", old_string: "= 1", new_string: "= 2" })).isError ? "error" : "ok"}`);
+  out.push(`B_EDIT=${(await tool("edit", { path: "src/nuevo.ts", old_string: "const b = 1", new_string: "const b = 2" })).isError ? "error" : "ok"}`);
+  out.push(`B_PWD=${(await tool("bash", { command: "pwd && echo hecho > marca.txt" })).text.split("\n")[0]}`);
+  out.push(`B_EXIT=${JSON.stringify((await tool("bash", { command: "exit 3" })).text)}`);
+  out.push(`B_GREP=${JSON.stringify((await tool("grep", { pattern: "const b", glob: "*.ts" })).text)}`);
+  out.push(`B_GLOB=${JSON.stringify((await tool("glob", { pattern: "**/*.ts" })).text)}`);
+  const outside = await tool("read", { path: "/etc/hostname" });
+  out.push(`B_FUERA=${outside.isError ? "denegado" : "permitido"}`);
+  return out;
+}
 
 const app = agent({ name: "fake-agent" })
   .onRequest(methods.agent.initialize, () => ({
     protocolVersion: PROTOCOL_VERSION,
-    agentCapabilities: { loadSession: false },
+    agentCapabilities: { loadSession: false, mcpCapabilities: { http: true } },
     agentInfo: { name: "fake-agent", version: "0.0.1" },
   }))
   .onRequest(methods.agent.session.new, ({ params }) => {
     sessionCwd = params.cwd;
+    const relay = params.mcpServers.find((s) => s.name === "relay");
+    mcpUrl = relay && "url" in relay ? relay.url : undefined;
+    sessionMeta = (params._meta ?? {}) as Record<string, unknown>;
     return { sessionId: "fake-session-1" };
   })
   .onRequest(methods.agent.session.prompt, async ({ params, client }) => {
@@ -31,6 +80,13 @@ const app = agent({ name: "fake-agent" })
       });
 
     const promptText = params.prompt.map((b) => (b.type === "text" ? b.text : `[${b.type}:${"uri" in b ? b.uri : ""}]`)).join(" ");
+
+    if (promptText.startsWith("PUENTE")) {
+      const lines = await bridgeReport();
+      writeFileSync(path.join(process.cwd(), ".fake-report"), lines.join("\n") + "\n");
+      await say(lines.join("\n") + "\n");
+      return { stopReason: "end_turn" };
+    }
     report.push(`PROMPT=${promptText}`);
     report.push(`CWD_AGENTE=${sessionCwd}`);
     report.push(`PROCESS_CWD=${process.cwd()}`);

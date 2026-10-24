@@ -28,6 +28,16 @@ interface Terminal {
   exitStatus?: WaitForTerminalExitResponse;
 }
 
+/** Muestra el comando real cuando viene envuelto en un shell (`sh -c …`, `cmd /c …`). */
+export function displayCommand(command: string, args: string[]): string {
+  const shells = /(^|[\\/])(sh|bash|zsh|cmd(\.exe)?)$/i;
+  const last = args.at(-1);
+  const wrapped = shells.test(command) && last !== undefined && args.slice(0, -1).every((a) => /^[-/]/.test(a));
+  const text = wrapped ? last : [command, ...args].join(" ");
+  const oneLine = text.replace(/\s+/g, " ").trim();
+  return oneLine.length > 160 ? `${oneLine.slice(0, 160)}…` : oneLine;
+}
+
 export type LocalActivity = (kind: "read" | "write" | "exec", detail: string) => void;
 
 /**
@@ -131,7 +141,7 @@ export class LocalTools {
     proc.stderr?.on("data", append);
 
     this.terminals.set(id, term);
-    this.onActivity("exec", [req.command, ...args].join(" "));
+    this.onActivity("exec", displayCommand(req.command, args));
     return { terminalId: id };
   }
 

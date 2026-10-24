@@ -12,7 +12,7 @@ CLI local (`relay`) y daemon remoto (`relay-daemon`) en TypeScript que conectan 
 ## Estructura
 
 - `src/shared/` — protocolo de control (`relay/hello`, `relay/ready`) y traducción de rutas.
-- `src/daemon/` — servidor WebSocket, auth, workspace espejo, puente con el adaptador ACP.
+- `src/daemon/` — servidor WebSocket, auth, workspace espejo, puente con el adaptador ACP y puente de herramientas MCP (`tool-bridge.ts`, `presets.ts`).
 - `src/cli/` — REPL, cliente ACP, herramientas locales (fs/terminal), comandos.
 - `examples/` — configuraciones de ejemplo y un comando personalizado.
 
@@ -26,5 +26,5 @@ CLI local (`relay`) y daemon remoto (`relay-daemon`) en TypeScript que conectan 
 ## Reglas del proyecto
 
 - El CLI nunca debe incluir SDKs ni credenciales de proveedores de IA.
-- No crear archivos específicos de un proveedor en proyectos de usuario (`CLAUDE.md`, `.claude/`, `.codex/`, `.opencode/`); solo `AGENTS.md` y `.agents/`. La traducción a cada proveedor vive en el daemon (`src/daemon/workspace.ts`).
+- No crear archivos específicos de un proveedor en proyectos de usuario (`CLAUDE.md`, `.claude/`, `.codex/`, `.opencode/`); solo `AGENTS.md` y `.agents/`. La traducción a cada proveedor vive en el daemon (`src/daemon/workspace.ts`, `src/daemon/presets.ts`).
 - Todo cambio de comportamiento debe cubrirse en `test/e2e.test.ts` o `test/unit.test.ts`.

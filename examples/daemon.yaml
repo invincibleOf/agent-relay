@@ -37,6 +37,11 @@ providers:
     instructionAliases:
       - path: CLAUDE.md
         content: "@AGENTS.md\n"
+    # Puente de herramientas: Claude usa read/write/edit/bash/grep/glob del
+    # daemon, que se ejecutan en tu máquina; sus herramientas internas se desactivan.
+    toolBridge:
+      enabled: true
+      preset: claude-code
 
   codex:
     command: npx
@@ -45,9 +50,12 @@ providers:
     #  OPENAI_API_KEY: sk-...
     # Codex ya lee .agents/skills y AGENTS.md (formato abierto): no necesita alias.
     skillsDirs: [".agents/skills"]
+    # Aún no hay preset para desactivar el shell interno de Codex.
+    toolBridge: { enabled: true, preset: none }
 
   opencode:
     command: opencode
     args: ["acp"]
     env: {}
     skillsDirs: [".opencode/skills"]
+    toolBridge: { enabled: true, preset: none }

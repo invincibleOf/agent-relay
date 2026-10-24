@@ -16,6 +16,7 @@ import { packageVersion } from "../shared/version.js";
 import { generateToken, isAuthorized } from "./auth.js";
 import { defaultDaemonConfigPath, loadDaemonConfig, type DaemonConfig } from "./config.js";
 import { bridgeSession } from "./session.js";
+import { ToolBridgeHub } from "./tool-bridge.js";
 import { materializeWorkspace } from "./workspace.js";
 
 const HELLO_TIMEOUT_MS = 10_000;
@@ -81,10 +82,13 @@ function main() {
   }
   if (command !== "serve") usage();
 
-  serve(config);
+  void serve(config);
 }
 
-function serve(config: DaemonConfig) {
+async function serve(config: DaemonConfig) {
+  const hub = new ToolBridgeHub();
+  await hub.start();
+
   const onHttp = (req: IncomingMessage, res: ServerResponse) => {
     if (req.url === "/health") {
       res.writeHead(200, { "content-type": "application/json" });
@@ -121,7 +125,7 @@ function serve(config: DaemonConfig) {
       socket.end("HTTP/1.1 401 Unauthorized\r\n\r\n");
       return;
     }
-    wss.handleUpgrade(req, socket, head, (ws) => onConnection(ws, peer ?? "?", config));
+    wss.handleUpgrade(req, socket, head, (ws) => onConnection(ws, peer ?? "?", config, hub));
   });
 
   server.listen(config.listen.port, config.listen.host, () => {
@@ -135,6 +139,7 @@ function serve(config: DaemonConfig) {
   const stop = () => {
     log("apagando…");
     for (const client of wss.clients) client.close(1001, "daemon-shutdown");
+    hub.close();
     server.close(() => process.exit(0));
     setTimeout(() => process.exit(0), 3000).unref();
   };
@@ -142,7 +147,7 @@ function serve(config: DaemonConfig) {
   process.on("SIGTERM", stop);
 }
 
-function onConnection(ws: WebSocket, peer: string, config: DaemonConfig) {
+function onConnection(ws: WebSocket, peer: string, config: DaemonConfig, hub: ToolBridgeHub) {
   const sendControl = (frame: ReadyFrame | ErrorFrame) => ws.send(JSON.stringify(frame));
   const fail = (message: string) => {
     log(`sesión rechazada (${peer}): ${message}`);
@@ -200,6 +205,7 @@ function onConnection(ws: WebSocket, peer: string, config: DaemonConfig) {
       remoteRoot,
       localRoot: hello.project.localRoot,
       localSep: hello.project.pathSeparator,
+      hub,
       log: (m) => log(`${tag} ${m}`),
     });
   });

@@ -59,6 +59,11 @@ describe("relay de punta a punta con un agente falso", () => {
         "    env: { FAKE_PROVIDER_KEY: secreto }",
         '    skillsDirs: [".claude/skills"]',
         "    instructionAliases: [{ path: CLAUDE.md }]",
+        "    toolBridge: { preset: claude-code }",
+        "  fake-sin-puente:",
+        `    command: ${JSON.stringify(process.execPath)}`,
+        `    args: ["--import", ${JSON.stringify(tsxLoader)}, ${JSON.stringify(path.join(repo, "test/fake-agent.ts"))}]`,
+        "    toolBridge: { enabled: false }",
       ].join("\n"),
     );
 
@@ -77,7 +82,8 @@ describe("relay de punta a punta con un agente falso", () => {
 
   after(() => {
     daemon?.kill();
-    rmSync(base, { recursive: true, force: true });
+    if (!process.env.RELAY_KEEP) rmSync(base, { recursive: true, force: true });
+    else console.error("BASE", base);
   });
 
   test("el agente piensa en remoto y actúa sobre el disco local", async () => {
@@ -136,6 +142,52 @@ describe("relay de punta a punta con un agente falso", () => {
     const r = await runCli(["--url", `ws://127.0.0.1:${port}/acp`, "-a", "otro", "-p", "hola"]);
     assert.equal(r.code, 1);
     assert.match(r.stderr, /proveedor "otro" no configurado.*fake/);
+  });
+
+  test("puente MCP: las herramientas del agente se ejecutan en la máquina local", async () => {
+    const r = await runCli(["--url", `ws://127.0.0.1:${port}/acp`, "-p", "PUENTE", "--yes"]);
+    assert.equal(r.code, 0, r.stderr + r.stdout);
+
+    const mirror = path.join(workspaces, projectIdFor(project), "fake");
+    const report = readFileSync(path.join(mirror, ".fake-report"), "utf8");
+    const get = (key: string) => new RegExp(`^${key}=(.*)$`, "m").exec(report)?.[1];
+
+    // El daemon inyectó el servidor MCP local y el preset de Claude Code.
+    assert.equal(get("MCP_URL"), "127.0.0.1");
+    assert.equal(get("DISALLOWED_READ"), "si");
+    assert.equal(get("ALLOWED"), "mcp__relay__read,mcp__relay__grep,mcp__relay__glob");
+    assert.equal(get("TOOLS"), "bash,edit,glob,grep,read,write");
+
+    // Lecturas: relativas y absolutas del espejo llegan a tu disco.
+    assert.equal(JSON.parse(get("B_READ")!), "     1\thola desde el disco local");
+    assert.equal(JSON.parse(get("B_READ_ABS")!), "     1\thola desde el disco local");
+
+    // Escritura y edición sobre el proyecto local; el edit ambiguo se rechaza.
+    assert.equal(get("B_WRITE"), "ok");
+    assert.equal(get("B_EDIT_AMBIGUO"), "error");
+    assert.equal(get("B_EDIT"), "ok");
+    assert.equal(readFileSync(path.join(project, "src/nuevo.ts"), "utf8"), "export const a = 1;\nexport const b = 2;\n");
+    assert.equal(existsSync(path.join(mirror, "src/nuevo.ts")), false);
+
+    // bash corre en la raíz local, pero el agente ve rutas del espejo (coherencia).
+    assert.equal(get("B_PWD"), mirror);
+    assert.equal(readFileSync(path.join(project, "marca.txt"), "utf8"), "hecho\n");
+    assert.match(JSON.parse(get("B_EXIT")!), /código de salida 3/);
+
+    // grep y glob buscan en el proyecto local y devuelven rutas del espejo.
+    assert.equal(JSON.parse(get("B_GREP")!), `${mirror}/src/nuevo.ts:2:export const b = 2;`);
+    assert.match(JSON.parse(get("B_GLOB")!), new RegExp(`${mirror}/src/nuevo\\.ts`));
+
+    // Fuera del proyecto: denegado por el CLI.
+    assert.equal(get("B_FUERA"), "denegado");
+    assert.match(r.stdout, /local escribe: src\/nuevo\.ts/);
+  });
+
+  test("con el puente desactivado no se inyecta nada", async () => {
+    const r = await runCli(["--url", `ws://127.0.0.1:${port}/acp`, "-a", "fake-sin-puente", "-p", "PUENTE", "--yes"]);
+    assert.equal(r.code, 0, r.stderr + r.stdout);
+    assert.match(r.stdout, /^MCP_URL=no$/m);
+    assert.match(r.stdout, /^DISALLOWED_READ=no$/m);
   });
 
   test("doctor muestra el agente y el workspace espejo", async () => {

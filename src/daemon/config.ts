@@ -26,6 +26,20 @@ const Provider = z.object({
   skillsDirs: z.array(z.string()).default([]),
   /** Archivos de instrucciones propios del proveedor que apuntan a AGENTS.md. */
   instructionAliases: z.array(InstructionAlias).default([]),
+  /**
+   * Puente de herramientas: el daemon ofrece al agente un servidor MCP cuyas
+   * herramientas (read, write, edit, bash, grep, glob) se ejecutan en la
+   * máquina del CLI.
+   */
+  toolBridge: z
+    .object({
+      enabled: z.boolean().default(true),
+      /** Cómo desactivar las herramientas internas del agente ("none" = no tocarlas). */
+      preset: z.enum(["claude-code", "none"]).default("none"),
+      /** `_meta` adicional que se mezcla en session/new, load y resume. */
+      sessionMeta: z.record(z.string(), z.unknown()).default({}),
+    })
+    .default({ enabled: true, preset: "none", sessionMeta: {} }),
 });
 
 const DaemonConfig = z.object({

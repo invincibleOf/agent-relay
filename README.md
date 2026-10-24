@@ -13,18 +13,35 @@ relay (CLI)                                     relay-daemon
  ├─ sin credenciales de IA                       ├─ único dueño de credenciales
  ├─ AGENTS.md + .agents/ (formato abierto)  ──►  ├─ workspace espejo por proyecto y proveedor
  ├─ lee/escribe archivos y ejecuta comandos      │   (AGENTS.md, skills, CLAUDE.md, .claude/skills…)
- │  cuando el agente lo delega (ACP)             ├─ traduce rutas local ⇄ espejo
+ │  por el puente de herramientas (MCP → ACP)   ├─ traduce rutas local ⇄ espejo
  └──── WebSocket (token + TLS/mTLS opcional) ────┘   y lanza claude-agent-acp / codex-acp / opencode acp
                  sobre Tailscale/WireGuard
 ```
 
-> ### ⚠️ Estado actual (v0.1): qué corre dónde
->
-> El protocolo y el daemon funcionan de punta a punta, y todo lo que el agente **delega por ACP** (`fs/read_text_file`, `fs/write_text_file`, `terminal/*`) ocurre en tu máquina. Lo verifica la prueba `test/e2e.test.ts`.
->
-> Pero en una prueba real con `@agentclientprotocol/claude-agent-acp` 0.95.0, **Claude Code no delegó ninguna herramienta**: `Read`, `Bash` y `Grep` se ejecutaron sobre el workspace espejo remoto, que solo contiene `AGENTS.md` y las skills. El adaptador implementa los métodos de ACP, pero no conecta las herramientas internas de Claude Code a ellos. Con Codex y OpenCode el comportamiento no está verificado aún.
->
-> La siguiente versión resuelve esto sin depender de cada adaptador (ver [Hoja de ruta](#hoja-de-ruta)).
+## Cómo llegan las herramientas del agente a tu máquina
+
+Los agentes usan sus propias herramientas (`Read`, `Edit`, `Bash`…), que corren dentro de su proceso, en la máquina remota. Para que actúen sobre tu proyecto, el daemon incluye un **puente de herramientas MCP**:
+
+1. En cada `session/new`, el daemon le pasa al agente un servidor MCP propio (`relay`) con las herramientas `read`, `write`, `edit`, `bash`, `grep` y `glob`, y desactiva las herramientas internas equivalentes según el `preset` del proveedor.
+2. Cuando el agente usa una de ellas, el daemon **no la ejecuta**: la convierte en una petición ACP estándar (`fs/read_text_file`, `fs/write_text_file`, `terminal/*`) y la envía a tu CLI por el WebSocket existente.
+3. Tu CLI la ejecuta en tu máquina, dentro de la carpeta del proyecto, y devuelve el resultado.
+
+```
+[remota]                                                   [tu máquina]
+agente ──mcp: read("src/a.ts")──► daemon ──ACP: fs/read──► relay (CLI)
+                                                              │ lee tu disco
+agente ◄──────── contenido ─────── daemon ◄──── contenido ────┘
+```
+
+Las rutas se traducen en ambos sentidos, así que el agente sigue viendo su workspace espejo de forma coherente (por ejemplo, `pwd` le devuelve la ruta del espejo).
+
+| Proveedor | Estado del puente |
+|---|---|
+| Claude Code (`claude-agent-acp`) | **Verificado** con el preset `claude-code`: lectura, escritura, comandos y búsquedas ocurren en tu máquina. |
+| Codex (`codex-acp`) | El handshake funciona. Las herramientas del puente se ofrecen, pero aún no hay preset para desactivar el shell interno de Codex, así que puede seguir usándolo en la remota. |
+| OpenCode (`opencode acp`) | Sin verificar. Sus herramientas internas se pueden desactivar con `tools` en su configuración. |
+
+`grep` y `glob` usan [ripgrep](https://github.com/BurntSushi/ripgrep) si está instalado en tu máquina (respeta `.gitignore`); si no, `grep` y `find`. Con un cliente Windows, por ahora solo `read`, `write`, `edit` y `bash` (con `cmd.exe`).
 
 ## Requisitos
 
@@ -128,7 +145,8 @@ mi-proyecto/
 - **Red**: el daemon debe escuchar solo en la interfaz de Tailscale/WireGuard o de la LAN. Sin TLS, el daemon lo advierte al arrancar.
 - **TLS/mTLS**: opcional, TLS 1.3 mínimo; con `clientCa` se exige certificado de cliente.
 - **Archivos locales**: el CLI solo permite leer, escribir y ejecutar dentro de la raíz del proyecto (y de `permissions.extraRoots`). Todo lo demás se rechaza.
-- **Permisos**: por defecto el CLI pregunta antes de cada acción que el agente marque como sensible; en modo `-p` sin `--yes`, se rechazan.
+- **Puente MCP**: escucha solo en `127.0.0.1` de la remota, con una URL secreta distinta por sesión que se invalida al cerrar la conexión.
+- **Permisos**: el preset `claude-code` aprueba solas las herramientas de solo lectura (`read`, `grep`, `glob`); `write`, `edit` y `bash` siguen el flujo de permisos. Por defecto el CLI pregunta antes de cada acción que el agente marque como sensible; en modo `-p` sin `--yes`, se rechazan.
 - **Workspace espejo**: las rutas que llegan del CLI se validan (nada absoluto ni con `..`) antes de escribirse en el daemon.
 
 ## Desarrollo
@@ -148,6 +166,8 @@ src/
 ├── daemon/
 │   ├── main.ts            # servidor WebSocket, auth, TLS/mTLS
 │   ├── session.ts         # puente WebSocket ⇄ stdio del adaptador ACP
+│   ├── tool-bridge.ts     # servidor MCP del puente: herramientas → ACP hacia el CLI
+│   ├── presets.ts         # cómo desactivar las herramientas internas de cada agente
 │   ├── workspace.ts       # workspace espejo y traducción a formatos de proveedor
 │   ├── auth.ts, config.ts
 └── cli/
@@ -165,10 +185,11 @@ test/
 
 ## Hoja de ruta
 
-1. **Puente MCP de herramientas locales (siguiente).** El daemon expone un servidor MCP por sesión (`read`, `write`, `edit`, `bash`, `grep`, `glob`) cuyas herramientas se implementan enviando peticiones ACP estándar (`fs/*`, `terminal/*`) al CLI por la conexión existente. Se pasa al agente en `session/new → mcpServers` y se desactivan sus herramientas internas por proveedor (Claude Code: `_meta.claudeCode.options.disallowedTools`; OpenCode: `tools` en su configuración; Codex: por investigar). Así todo ocurre en tu máquina, sin depender de cada adaptador.
-2. Reconexión y reanudación de sesiones (`session/load`).
-3. Sincronización en vivo de `AGENTS.md` y `.agents/` cuando cambian durante la sesión.
-4. Instalador como servicio (`systemd`/`launchd`) para el daemon.
+1. ~~Puente MCP de herramientas locales~~ (v0.2).
+2. Presets para Codex y OpenCode que desactiven sus herramientas internas.
+3. Reconexión y reanudación de sesiones (`session/load`).
+4. Sincronización en vivo de `AGENTS.md` y `.agents/` cuando cambian durante la sesión.
+5. Instalador como servicio (`systemd`/`launchd`) para el daemon.
 
 ## Licencia
 
