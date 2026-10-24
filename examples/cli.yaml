@@ -1,0 +1,28 @@
+# Configuración del CLI (tu máquina local).
+# Ubicación por defecto: ~/.config/agent-relay/cli.yaml
+#
+# Aquí no hay ninguna credencial de proveedores de IA: solo cómo llegar a tu daemon.
+
+defaultHost: casa
+
+hosts:
+  casa:
+    # Nombre MagicDNS o IP de Tailscale del daemon. Funciona igual en tu LAN y fuera de casa.
+    url: ws://servidor-casa:7443/acp
+    tokenEnv: RELAY_TOKEN_CASA
+    # provider: claude
+
+  aws:
+    url: wss://relay-aws.tu-tailnet.ts.net:7443/acp
+    tokenFile: ~/.config/agent-relay/aws.token
+    # Para TLS con CA propia y mTLS:
+    # ca: ~/.config/agent-relay/tls/ca.crt
+    # cert: ~/.config/agent-relay/tls/client.crt
+    # key: ~/.config/agent-relay/tls/client.key
+    provider: codex
+
+permissions:
+  # Pide confirmación antes de que el agente escriba o ejecute algo (recomendado).
+  autoApprove: false
+  # Carpetas extra, fuera del proyecto, a las que el agente puede acceder.
+  extraRoots: []

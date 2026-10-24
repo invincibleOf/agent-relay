@@ -1,0 +1,53 @@
+# Configuración del daemon (máquina remota: AWS, tu casa, donde quieras).
+# Ubicación por defecto: ~/.config/agent-relay/daemon.yaml
+
+listen:
+  # Escucha solo en la IP de Tailscale/WireGuard (o de tu LAN). Nunca 0.0.0.0 en internet.
+  host: 100.64.0.10
+  port: 7443
+
+# TLS opcional. Dentro de Tailscale/WireGuard el tráfico ya va cifrado, pero
+# puedes sumar TLS 1.3 y, con clientCa, exigir certificado de cliente (mTLS).
+# tls:
+#   cert: ~/.config/agent-relay/tls/server.crt
+#   key: ~/.config/agent-relay/tls/server.key
+#   clientCa: ~/.config/agent-relay/tls/ca.crt
+
+auth:
+  # Hashes SHA-256 de los tokens aceptados. Genera uno con: relay-daemon gen-token
+  tokenSha256:
+    - "reemplaza-con-el-hash-de-64-caracteres-hexadecimales-generado-aqui"
+
+# Workspaces espejo: aquí viven AGENTS.md, las skills y los archivos propios de
+# cada proveedor (CLAUDE.md, .claude/skills…). Nunca en tu máquina local.
+workspacesDir: ~/.local/share/agent-relay/workspaces
+
+defaultProvider: claude
+
+providers:
+  claude:
+    command: npx
+    args: ["-y", "@agentclientprotocol/claude-agent-acp"]
+    # Credenciales: haz `claude` → /login en esta máquina, o define la API key aquí.
+    env: {}
+    #  ANTHROPIC_API_KEY: sk-ant-...
+    skillsDirs: [".claude/skills"]
+    # Claude Code lee AGENTS.md si no hay CLAUDE.md; el alias asegura compatibilidad
+    # con versiones anteriores y con Bedrock/Vertex/Foundry.
+    instructionAliases:
+      - path: CLAUDE.md
+        content: "@AGENTS.md\n"
+
+  codex:
+    command: npx
+    args: ["-y", "@zed-industries/codex-acp"]
+    env: {}
+    #  OPENAI_API_KEY: sk-...
+    # Codex ya lee .agents/skills y AGENTS.md (formato abierto): no necesita alias.
+    skillsDirs: [".agents/skills"]
+
+  opencode:
+    command: opencode
+    args: ["acp"]
+    env: {}
+    skillsDirs: [".opencode/skills"]
