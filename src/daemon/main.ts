@@ -12,6 +12,7 @@ import {
   type HelloFrame,
   type ReadyFrame,
 } from "../shared/protocol.js";
+import { box, isTTY, makeStyles, rows, stripAnsi, tildify } from "../shared/ui.js";
 import { packageVersion } from "../shared/version.js";
 import { generateToken, isAuthorized } from "./auth.js";
 import { defaultDaemonConfigPath, loadDaemonConfig, type DaemonConfig } from "./config.js";
@@ -36,17 +37,68 @@ const HelloSchema = z.object({
   client: z.object({ name: z.string(), version: z.string(), hostname: z.string() }),
 });
 
+const st = makeStyles(isTTY(process.stderr));
+
+/** Línea de log: hora local, etiqueta de sesión resaltada y avisos en amarillo. */
 function log(msg: string) {
-  process.stderr.write(`${new Date().toISOString()} ${msg}\n`);
+  const time = new Date().toTimeString().slice(0, 8);
+  let text = msg.replace(/^(\[[^\]]+\])/, (t) => st.accent(t));
+  if (/^(\S+ )?(aviso|no se pudo|error)/i.test(stripAnsi(text).replace(/^\[[^\]]+\] /, ""))) text = st.yellow(text);
+  text = text.replace(/(puente → |→ delegado al cliente por ACP: )/, (t) => st.blue(t));
+  process.stderr.write(`${st.gray(time)}  ${text}\n`);
+}
+
+function printDaemonBanner(config: DaemonConfig) {
+  const scheme = config.tls ? "wss" : "ws";
+  const url = `${scheme}://${config.listen.host}:${config.listen.port}/acp`;
+  const security = config.tls?.clientCa
+    ? st.green("TLS 1.3 + mTLS")
+    : config.tls
+      ? st.green("TLS 1.3")
+      : st.yellow("sin TLS · úsalo solo dentro de Tailscale/WireGuard o la LAN");
+  const nameWidth = Math.max(...Object.keys(config.providers).map((n) => n.length + (n === config.defaultProvider ? 14 : 0)));
+  const providerLines = Object.entries(config.providers).map(([name, p]) => {
+    const isDefault = name === config.defaultProvider ? st.gray(" (por defecto)") : "";
+    const pad = " ".repeat(Math.max(0, nameWidth - name.length - (isDefault ? 14 : 0)));
+    const bridge = !p.toolBridge.enabled
+      ? st.yellow("puente desactivado")
+      : p.toolBridge.preset === "none"
+        ? st.yellow("puente sin preset")
+        : `${st.green("✓")} ${st.gray(`puente · preset ${p.toolBridge.preset}`)}`;
+    return `${st.bold(name)}${isDefault}${pad}  ${bridge}`;
+  });
+  const entries: Array<[string, string]> = [
+    ["escucha", `${st.bold(url)}`],
+    ["seguridad", security],
+    ["proveedores", providerLines[0] ?? ""],
+    ...providerLines.slice(1).map((l): [string, string] => ["", l]),
+    ["espejos", st.gray(tildify(config.workspacesDir))],
+    ["tokens", `${config.auth.tokenSha256.length} autorizado${config.auth.tokenSha256.length === 1 ? "" : "s"}`],
+  ];
+  const out = [
+    "",
+    box([`${st.bold(st.accent("◆ relay-daemon"))}  ${st.gray(`v${packageVersion()}`)}`, st.gray(`agent-relay en ${hostname()} · node ${process.versions.node} · pid ${process.pid}`)], st),
+    "",
+    ...rows(entries, st),
+    "",
+  ];
+  process.stderr.write(out.join("\n") + "\n");
 }
 
 function usage(): never {
-  process.stdout.write(`relay-daemon ${packageVersion()}
+  const out = makeStyles(isTTY());
+  process.stdout.write(`${out.bold(out.accent("◆ relay-daemon"))} ${out.gray(`v${packageVersion()}`)}
+Daemon de agent-relay: ejecuta los agentes y es el único que consume los proveedores de IA.
 
-Uso:
-  relay-daemon [--config <ruta>]     Inicia el daemon (por defecto ${defaultDaemonConfigPath()})
-  relay-daemon check [--config <ruta>]  Valida la configuración
-  relay-daemon gen-token             Genera un token y su hash SHA-256
+${out.bold("Uso")}
+  relay-daemon [--config <ruta>]         Inicia el daemon (por defecto ${tildify(defaultDaemonConfigPath())})
+  relay-daemon check [--config <ruta>]   Valida la configuración y muestra el preset de cada proveedor
+  relay-daemon gen-token                 Genera un token y su hash SHA-256
+  relay-daemon --version
+
+${out.bold("Variables")}
+  RELAY_DEBUG=1       Muestra toda la salida de los adaptadores
+  RELAY_DEBUG_MCP=1   Registra cada llamada del agente al puente de herramientas
 `);
   process.exit(0);
 }
@@ -54,9 +106,17 @@ Uso:
 function main() {
   const { values, positionals } = parseArgs({
     allowPositionals: true,
-    options: { config: { type: "string", short: "c" }, help: { type: "boolean", short: "h" } },
+    options: {
+      config: { type: "string", short: "c" },
+      help: { type: "boolean", short: "h" },
+      version: { type: "boolean", short: "v" },
+    },
   });
   if (values.help) usage();
+  if (values.version) {
+    process.stdout.write(`${packageVersion()}\n`);
+    return;
+  }
 
   const command = positionals[0] ?? "serve";
   if (command === "gen-token") {
@@ -132,11 +192,8 @@ async function serve(config: DaemonConfig) {
   });
 
   server.listen(config.listen.port, config.listen.host, () => {
-    log(
-      `relay-daemon ${packageVersion()} escuchando en ${config.tls ? "wss" : "ws"}://${config.listen.host}:${config.listen.port}/acp` +
-        (config.tls?.clientCa ? " (mTLS)" : config.tls ? " (TLS)" : " (sin TLS: úsalo solo dentro de Tailscale/WireGuard o la LAN)"),
-    );
-    log(`proveedores: ${Object.keys(config.providers).join(", ")} · por defecto: ${config.defaultProvider}`);
+    printDaemonBanner(config);
+    log(`escuchando conexiones · Ctrl+C para detener`);
     for (const [n, p] of Object.entries(config.providers)) {
       if (!p.toolBridge.enabled) log(`aviso: ${n} tiene el puente desactivado; sus herramientas actuarán sobre esta máquina`);
       else if (p.toolBridge.preset === "none") log(`aviso: ${n} conserva sus herramientas internas (preset none); puede trabajar sobre esta máquina en vez de la del CLI`);
@@ -194,7 +251,7 @@ function onConnection(ws: WebSocket, peer: string, config: DaemonConfig, hub: To
     }
 
     const tag = `[${hello.client.hostname}:${hello.project.name}/${providerName}]`;
-    log(`${tag} sesión abierta desde ${peer} · ${hello.project.files.length} archivo(s) abiertos sincronizados`);
+    log(`${tag} sesión abierta desde ${peer} · ${hello.project.files.length} archivo(s) en formato abierto · ${tildify(hello.project.localRoot)}`);
 
     sendControl({
       type: "relay/ready",

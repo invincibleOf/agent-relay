@@ -164,7 +164,14 @@ export function bridgeSession(opts: BridgeOptions): ChildProcessWithoutNullStrea
     sendToClient(toClient(msg));
   });
 
-  createInterface({ input: child.stderr }).on("line", (line) => log(`[${providerName}] ${line}`));
+  // El stderr de los adaptadores es muy ruidoso (tiempos, eventos internos):
+  // solo se muestran errores y avisos, salvo con RELAY_DEBUG=1.
+  const verbose = Boolean(process.env.RELAY_DEBUG);
+  createInterface({ input: child.stderr }).on("line", (line) => {
+    if (verbose || /\b(error|fail(ed)?|fatal|warn(ing)?|exception|denied|unauthorized|login)\b/i.test(line)) {
+      log(`agente: ${line.length > 300 ? `${line.slice(0, 300)}…` : line}`);
+    }
+  });
 
   // ── CLI → agente ───────────────────────────────────────────────────────────
   ws.on("message", (data, isBinary) => {

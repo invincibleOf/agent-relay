@@ -38,7 +38,23 @@ export function displayCommand(command: string, args: string[]): string {
   return oneLine.length > 160 ? `${oneLine.slice(0, 160)}…` : oneLine;
 }
 
-export type LocalActivity = (kind: "read" | "write" | "exec", detail: string) => void;
+export type LocalActivityKind = "read" | "write" | "edit" | "exec" | "search" | "list";
+export type LocalActivity = (kind: LocalActivityKind, detail: string) => void;
+
+/**
+ * El daemon puede describir cómo mostrar una operación del puente en
+ * `_meta.relay` (p. ej. "busca 'x'" en lugar del comando rg completo, u
+ * ocultar la lectura interna de un edit).
+ */
+interface RelayDisplayMeta {
+  hidden?: boolean;
+  kind?: LocalActivityKind;
+  detail?: string;
+}
+function relayMeta(meta: unknown): RelayDisplayMeta | undefined {
+  const r = (meta as { relay?: unknown } | null | undefined)?.relay;
+  return r && typeof r === "object" ? (r as RelayDisplayMeta) : undefined;
+}
 
 /**
  * Implementa en la máquina local las capacidades de cliente de ACP:
@@ -85,7 +101,7 @@ export class LocalTools {
       const end = req.limit != null ? start + req.limit : lines.length;
       content = lines.slice(start, end).join("\n");
     }
-    this.onActivity("read", this.display(abs));
+    this.report(req._meta, "read", this.display(abs));
     return { content };
   }
 
@@ -93,7 +109,7 @@ export class LocalTools {
     const abs = this.ensureAllowed(req.path);
     await mkdir(path.dirname(abs), { recursive: true });
     await writeFile(abs, req.content, "utf8");
-    this.onActivity("write", this.display(abs));
+    this.report(req._meta, "write", this.display(abs));
     return {};
   }
 
@@ -141,7 +157,7 @@ export class LocalTools {
     proc.stderr?.on("data", append);
 
     this.terminals.set(id, term);
-    this.onActivity("exec", displayCommand(req.command, args));
+    this.report(req._meta, "exec", displayCommand(req.command, args));
     return { terminalId: id };
   }
 
@@ -176,6 +192,12 @@ export class LocalTools {
   disposeAll() {
     for (const t of this.terminals.values()) if (!t.exitStatus) t.proc.kill("SIGTERM");
     this.terminals.clear();
+  }
+
+  private report(meta: unknown, kind: LocalActivityKind, detail: string) {
+    const m = relayMeta(meta);
+    if (m?.hidden) return;
+    this.onActivity(m?.kind ?? kind, m?.detail ?? detail);
   }
 
   private display(abs: string): string {

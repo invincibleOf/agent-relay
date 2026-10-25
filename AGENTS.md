@@ -11,9 +11,9 @@ CLI local (`relay`) y daemon remoto (`relay-daemon`) en TypeScript que conectan 
 
 ## Estructura
 
-- `src/shared/` — protocolo de control (`relay/hello`, `relay/ready`) y traducción de rutas.
+- `src/shared/` — protocolo de control (`relay/hello`, `relay/ready`), traducción de rutas y utilidades de terminal (`ui.ts`).
 - `src/daemon/` — servidor WebSocket, auth, workspace espejo, puente con el adaptador ACP y puente de herramientas MCP (`tool-bridge.ts`, `presets.ts`).
-- `src/cli/` — REPL, cliente ACP, herramientas locales (fs/terminal), comandos.
+- `src/cli/` — REPL, cliente ACP, herramientas locales (fs/terminal), comandos, renderizado (`render.ts`, `markdown.ts`).
 - `examples/` — configuraciones de ejemplo y un comando personalizado.
 
 ## Convenciones
@@ -22,6 +22,7 @@ CLI local (`relay`) y daemon remoto (`relay-daemon`) en TypeScript que conectan 
 - Mensajes al usuario y comentarios en español.
 - SDK de ACP: `@agentclientprotocol/sdk` (entrada estable v1). Usa las constantes de `methods`, no strings.
 - Valida toda entrada externa con `zod` y toda ruta antes de tocar disco.
+- Salida de terminal con `makeStyles` de `src/shared/ui.ts`: sin colores ni formato si no es una TTY o con `NO_COLOR`.
 
 ## Reglas del proyecto
 

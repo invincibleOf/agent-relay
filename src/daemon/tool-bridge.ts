@@ -218,14 +218,14 @@ export function buildMcpServer(t: BridgeTarget): McpServer {
     guarded("edit", async ({ path: pathArg, file_path, old_string, new_string, replace_all }) => {
       const p = requirePath(pathArg, file_path);
       const local = io.toLocal(p);
-      const { content } = await io.fs<{ content: string }>("fs/read_text_file", { path: local });
+      const { content } = await io.fs<{ content: string }>("fs/read_text_file", { path: local, _meta: { relay: { hidden: true } } });
       const count = content.split(old_string).length - 1;
       if (count === 0) return fail(`old_string no aparece en ${p}`);
       if (count > 1 && !replace_all) {
         return fail(`old_string aparece ${count} veces en ${p}; agrega más contexto o usa replace_all`);
       }
       const updated = replace_all ? content.split(old_string).join(new_string) : content.replace(old_string, () => new_string);
-      await io.fs("fs/write_text_file", { path: local, content: updated });
+      await io.fs("fs/write_text_file", { path: local, content: updated, _meta: { relay: { kind: "edit" } } });
       return ok(`Editado ${p} (${replace_all ? count : 1} reemplazo(s))`);
     }),
   );
@@ -272,7 +272,8 @@ export function buildMcpServer(t: BridgeTarget): McpServer {
       const rg = `rg ${l} --no-heading --color never ${i} ${glob ? `-g ${q(glob)}` : ""} -e ${q(pattern)} -- ${target}`;
       const gr = `grep -rE ${l} ${i} ${glob ? `--include=${q(glob)}` : ""} --exclude-dir=.git --exclude-dir=node_modules -e ${q(pattern)} -- ${target}`;
       const cmd = `if command -v rg >/dev/null 2>&1; then ${rg}; else ${gr}; fi | head -n ${max_results ?? 500}`;
-      const r = await io.shell(cmd, DEFAULT_BASH_TIMEOUT_MS);
+      const where = p ? ` en ${p}` : "";
+      const r = await io.shell(cmd, DEFAULT_BASH_TIMEOUT_MS, { kind: "search", detail: `'${pattern}'${where}${glob ? ` (${glob})` : ""}` });
       return ok(io.toRemoteText(r.output).trim() || "Sin coincidencias");
     }),
   );
@@ -296,7 +297,7 @@ export function buildMcpServer(t: BridgeTarget): McpServer {
       const rg = `rg --files --color never -g ${q(pattern)} -- ${target}`;
       const fd = `find ${target} -type f -name ${q(base)} -not -path '*/.git/*' -not -path '*/node_modules/*'`;
       const cmd = `if command -v rg >/dev/null 2>&1; then ${rg}; else ${fd}; fi | head -n ${max_results ?? 1000}`;
-      const r = await io.shell(cmd, DEFAULT_BASH_TIMEOUT_MS);
+      const r = await io.shell(cmd, DEFAULT_BASH_TIMEOUT_MS, { kind: "list", detail: `${pattern}${p ? ` en ${p}` : ""}` });
       return ok(io.toRemoteText(r.output).trim() || "Sin archivos");
     }),
   );
@@ -351,7 +352,8 @@ class BridgeIO {
     return this.t.requester.request<T>(method, { sessionId, ...params });
   }
 
-  async shell(command: string, timeoutMs: number) {
+  /** `display` le dice al CLI cómo mostrar la operación (ver RelayDisplayMeta). */
+  async shell(command: string, timeoutMs: number, display?: { kind: string; detail: string }) {
     const sessionId = await this.t.sessionId;
     const [cmd, args] = this.windows ? ["cmd.exe", ["/d", "/s", "/c", command]] : ["/bin/sh", ["-c", command]];
     this.t.log(`puente → terminal ${command.length > 120 ? `${command.slice(0, 120)}…` : command}`);
@@ -362,6 +364,7 @@ class BridgeIO {
       args,
       cwd: this.t.localRoot,
       outputByteLimit: MAX_TOOL_OUTPUT * 2,
+      ...(display ? { _meta: { relay: display } } : {}),
     });
     const base = { sessionId, terminalId };
 

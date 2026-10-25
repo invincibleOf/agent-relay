@@ -120,8 +120,8 @@ describe("relay de punta a punta con un agente falso", () => {
     // Y la escritura no quedó en el espejo remoto.
     assert.equal(existsSync(path.join(mirror, "salida.txt")), false);
     // El CLI mostró la actividad local.
-    assert.match(r.stdout, /local escribe: salida\.txt/);
-    assert.match(r.stdout, /local ejecuta: pwd/);
+    assert.match(r.stdout, /⌂ escribe\s+salida\.txt/);
+    assert.match(r.stdout, /⌂ ejecuta\s+\$ pwd/);
   });
 
   test("sin --yes en modo no interactivo, los permisos se rechazan", async () => {
@@ -182,24 +182,28 @@ describe("relay de punta a punta con un agente falso", () => {
 
     // Fuera del proyecto: denegado por el CLI.
     assert.equal(get("B_FUERA"), "denegado");
-    assert.match(r.stdout, /local escribe: src\/nuevo\.ts/);
+    assert.match(r.stdout, /⌂ escribe\s+src\/nuevo\.ts/);
+    assert.match(r.stdout, /⌂ edita\s+src\/nuevo\.ts/);
+    assert.doesNotMatch(r.stdout, /⌂ lee\s+src\/nuevo\.ts/); // la lectura interna del edit no se muestra
+    assert.match(r.stdout, /⌂ busca\s+'const b' \(\*\.ts\)/);
+    assert.match(r.stdout, /⌂ lista\s+\*\*\/\*\.ts/);
   });
 
   test("con el puente desactivado no se inyecta nada", async () => {
     const r = await runCli(["--url", `ws://127.0.0.1:${port}/acp`, "-a", "fake-sin-puente", "-p", "PUENTE", "--yes"]);
     assert.equal(r.code, 0, r.stderr + r.stdout);
     assert.match(r.stdout, /^MCP_URL=no$/m);
-    assert.match(r.stdout, /aviso: el puente está desactivado/);
+    assert.match(r.stderr, /el puente está desactivado/);
     assert.match(r.stdout, /^DISALLOWED_READ=no$/m);
   });
 
   test("doctor muestra el agente y el workspace espejo", async () => {
     const r = await runCli(["doctor", "--url", `ws://127.0.0.1:${port}/acp`]);
     assert.equal(r.code, 0, r.stderr);
-    assert.match(r.stdout, /agente: fake-agent 0\.0\.1/);
-    assert.match(r.stdout, /puente de herramientas: activo \(preset claude-code\)/);
-    assert.match(r.stdout, /ripgrep en esta máquina: /);
-    assert.doesNotMatch(r.stdout, /aviso: el /);
-    assert.match(r.stdout, /workspace espejo: /);
+    assert.match(r.stdout, /agente\s+fake-agent 0\.0\.1/);
+    assert.match(r.stdout, /✓ puente\s+activo \(preset claude-code\)/);
+    assert.match(r.stdout, /ripgrep\s+ripgrep \d/);
+    assert.doesNotMatch(r.stdout, /^\s+! /m);
+    assert.match(r.stdout, /espejo\s+\S+/);
   });
 });

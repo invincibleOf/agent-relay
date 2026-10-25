@@ -10,27 +10,32 @@ import {
   methods,
   type ClientConnection,
   type ContentBlock,
+  type InitializeResponse,
   type RequestPermissionRequest,
   type RequestPermissionResponse,
+  type SessionConfigOption,
   type SessionModeState,
 } from "@agentclientprotocol/sdk";
+import type { ProjectFile, ReadyFrame } from "../shared/protocol.js";
+import { box, rows, termWidth, tildify, truncate, truncateStart, visibleWidth } from "../shared/ui.js";
 import { packageVersion } from "../shared/version.js";
 import { INIT_PROMPT, expandTemplate, loadCustomCommands } from "./commands.js";
-import { defaultCliConfigPath, loadCliConfig, resolveHost } from "./config.js";
+import { defaultCliConfigPath, loadCliConfig, resolveHost, type ResolvedHost } from "./config.js";
 import { LocalTools } from "./local-tools.js";
 import { collectProjectFiles, findProjectRoot, projectId } from "./project.js";
-import { Renderer, color } from "./render.js";
+import { Renderer, st } from "./render.js";
 import { connectRelay } from "./transport.js";
 
-const HELP = `relay ${packageVersion()} — agentes de código remotos que trabajan sobre tu máquina
+const HELP = `${st.bold(st.accent("◆ agent-relay"))} ${st.gray(`v${packageVersion()}`)}
+Agentes de código que corren en otra máquina y trabajan sobre tu proyecto local.
 
-Uso:
+${st.bold("Uso")}
   relay [opciones]                 Sesión interactiva
   relay [opciones] -p "<prompt>"   Un solo prompt y salir
-  relay doctor [opciones]          Verifica conexión con el daemon y el agente
+  relay doctor [opciones]          Verifica conexión, agente, puente y ripgrep
 
-Opciones:
-  -H, --host <nombre>     Host definido en ${defaultCliConfigPath()}
+${st.bold("Opciones")}
+  -H, --host <nombre>     Host definido en ${tildify(defaultCliConfigPath())}
   -a, --agent <nombre>    Proveedor en el daemon (claude, codex, opencode…)
       --url <ws(s)://…>   Conexión directa (requiere RELAY_TOKEN)
   -p, --print <prompt>    Modo no interactivo
@@ -41,21 +46,29 @@ Opciones:
   -v, --version
   -h, --help
 
-Comandos en la sesión: escribe /help
+Dentro de la sesión escribe ${st.cyan("/help")} para ver los comandos.
 `;
 
-const BUILTIN_HELP = `Comandos:
-  /help                 Esta ayuda
-  /new                  Nueva sesión con el agente
-  /init                 Crea o mejora AGENTS.md (formato abierto)
-  /commands             Lista comandos personalizados y del agente
-  /modes                Lista modos del agente
-  /mode <id>            Cambia de modo
-  /status               Host, proveedor y workspace remoto
-  /exit                 Salir
-  Ctrl+C                Cancela el turno en curso (dos veces para salir)
-  @ruta/archivo         Adjunta un archivo local como referencia
-Cualquier otro /comando se busca en .agents/commands/ o se envía al agente.`;
+const BUILTIN_COMMANDS: Array<[string, string]> = [
+  ["/help", "Esta ayuda"],
+  ["/new", "Nueva sesión con el agente"],
+  ["/init", "Crea o mejora AGENTS.md (formato abierto)"],
+  ["/model [id]", "Muestra o cambia el modelo"],
+  ["/mode [id]", "Muestra o cambia el modo del agente"],
+  ["/commands", "Comandos personalizados y del agente"],
+  ["/status", "Conexión, agente, puente y sesión"],
+  ["/clear", "Limpia la pantalla"],
+  ["/exit", "Salir"],
+];
+
+interface Context {
+  host: ResolvedHost;
+  ready: ReadyFrame;
+  init: InitializeResponse;
+  root: string;
+  files: ProjectFile[];
+  renderer: Renderer;
+}
 
 async function main() {
   const { values, positionals } = parseArgs({
@@ -78,31 +91,21 @@ async function main() {
   if (values.version) return void process.stdout.write(`${packageVersion()}\n`);
 
   const subcommand = positionals[0];
+  const isDoctor = subcommand === "doctor";
+  const interactive = values.print === undefined && !isDoctor;
   const cfg = loadCliConfig(values.config ?? defaultCliConfigPath());
   const host = resolveHost(cfg, values.host, values.url);
   const autoApprove = values.yes ?? cfg.permissions.autoApprove;
 
   const root = findProjectRoot(values.cwd ?? process.cwd());
-  const { files, warnings } = collectProjectFiles(root);
+  const { files, warnings: projectWarnings } = collectProjectFiles(root);
 
   const renderer = new Renderer(values.thoughts ?? false);
   const tools = new LocalTools(root, cfg.permissions.extraRoots, (k, d) => renderer.local(k, d));
-  const interactive = values.print === undefined && subcommand !== "doctor";
 
-  for (const w of warnings) renderer.line(color.yellow(`aviso: ${w}`));
-
+  if (interactive) process.stdout.write(st.gray(`  conectando con ${host.url}…\r`));
   const relay = await connectRelay({ host, provider: values.agent, project: { root, id: projectId(root), files } });
-
-  renderer.line(
-    color.bold(`relay → ${relay.ready.daemon.hostname}`) +
-      color.dim(` · host ${host.name} · proveedor ${relay.ready.provider} · consumo de IA en el daemon`),
-  );
-  renderer.line(color.dim(`proyecto ${root} · ${files.length} archivo(s) en formato abierto sincronizados`));
-  const bridgeStatus = describeBridge(relay.ready);
-  if (bridgeStatus.warning) renderer.line(color.yellow(`aviso: ${bridgeStatus.warning}`));
-  if (subcommand !== "doctor" && bridgeStatus.summary.startsWith("activo") && !ripgrepVersion()) {
-    renderer.line(color.dim(`nota: ripgrep no está instalado aquí; las búsquedas del agente serán más lentas. ${RIPGREP_HINT}`));
-  }
+  if (interactive) process.stdout.write("\x1b[2K");
 
   let rl: Interface | undefined;
   const ask = async (q: string) => {
@@ -126,7 +129,7 @@ async function main() {
   const acp = app.connect(relay.stream);
   relay.closed.then(({ code, reason }) => {
     tools.disposeAll();
-    if (code !== 1000 || reason) renderer.line(color.yellow(`conexión con el daemon cerrada (${code}${reason ? ` ${reason}` : ""})`));
+    if (code !== 1000 || reason) renderer.line(st.yellow(`  ! conexión con el daemon cerrada (${code}${reason ? ` ${reason}` : ""})`));
     acp.close();
   });
 
@@ -136,23 +139,11 @@ async function main() {
     clientInfo: { name: "agent-relay", title: "agent-relay CLI", version: packageVersion() },
   });
 
-  if (subcommand === "doctor") {
-    renderer.line(`agente: ${init.agentInfo?.name ?? "?"} ${init.agentInfo?.version ?? ""}`);
-    renderer.line(`protocolo ACP: v${init.protocolVersion}`);
-    renderer.line(`daemon: ${relay.ready.daemon.hostname} v${relay.ready.daemon.version}`);
-    renderer.line(`puente de herramientas: ${bridgeStatus.summary}`);
-    renderer.line(`workspace espejo: ${relay.ready.remoteWorkspace}`);
-    renderer.line(`proveedores en el daemon: ${relay.ready.availableProviders.join(", ")}`);
-    const rg = ripgrepVersion();
-    renderer.line(
-      rg
-        ? `ripgrep en esta máquina: ${rg}`
-        : color.yellow(`ripgrep en esta máquina: no encontrado. grep y glob usarán grep/find (más lentos, sin .gitignore). ${RIPGREP_HINT}`),
-    );
-    const localKeys = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENCODE_API_KEY"].filter((k) => process.env[k]);
-    if (localKeys.length) {
-      renderer.line(color.yellow(`nota: ${localKeys.join(", ")} definidas aquí; relay no las usa, el consumo ocurre en el daemon.`));
-    }
+  const ctx: Context = { host, ready: relay.ready, init, root, files, renderer };
+  const warnings = [...projectWarnings, ...connectionWarnings(ctx)];
+
+  if (isDoctor) {
+    printDoctor(ctx, warnings);
     relay.close();
     return;
   }
@@ -160,19 +151,24 @@ async function main() {
   let session = await newSession(acp, root, renderer);
 
   if (!interactive) {
-    const stop = await runTurn(acp, session.id, buildPrompt(values.print ?? "", process.cwd()), renderer);
+    // En modo -p la salida estándar queda para la respuesta; el encabezado va a stderr.
+    process.stderr.write(st.gray(`agent-relay v${packageVersion()} · ${relay.ready.provider} en ${relay.ready.daemon.hostname}\n`));
+    for (const w of warnings) process.stderr.write(st.yellow(`! ${w}\n`));
+    const stop = await runTurn(acp, session.id, buildPrompt(values.print ?? "", process.cwd()), renderer, false);
     renderer.newline();
     relay.close();
     process.exitCode = stop === "error" ? 1 : 0;
     return;
   }
 
+  printBanner(ctx, session, warnings);
+
   rl = createInterface({ input: process.stdin, output: process.stdout, terminal: process.stdin.isTTY });
   let turnActive = false;
   let lastSigint = 0;
   rl.on("SIGINT", () => {
     if (turnActive) {
-      renderer.line(color.yellow("cancelando turno…"));
+      renderer.line(st.yellow("  cancelando…"));
       void acp.agent.notify(methods.agent.session.cancel, { sessionId: session.id });
       return;
     }
@@ -182,16 +178,15 @@ async function main() {
       process.exit(0);
     }
     lastSigint = Date.now();
-    renderer.line(color.dim("(Ctrl+C otra vez para salir)"));
+    renderer.line(st.gray("  (Ctrl+C otra vez para salir)"));
   });
 
-  renderer.line(color.dim("Escribe tu mensaje, /help para ver comandos."));
   const commands = () => loadCustomCommands(root);
 
   for (;;) {
     let input: string;
     try {
-      input = (await rl.question(color.bold("\n› "))).trim();
+      input = (await rl.question(`\n${st.accent("›")} `)).trim();
     } catch {
       break; // stdin cerrado
     }
@@ -200,7 +195,7 @@ async function main() {
     let promptText = input;
     if (input.startsWith("/")) {
       const [cmd, ...rest] = input.slice(1).split(" ");
-      const args = rest.join(" ");
+      const args = rest.join(" ").trim();
       switch (cmd) {
         case "exit":
         case "quit":
@@ -208,42 +203,48 @@ async function main() {
           relay.close();
           return;
         case "help":
-          renderer.line(BUILTIN_HELP);
+          printHelp(renderer, commands().size);
+          continue;
+        case "clear":
+          process.stdout.write("\x1b[2J\x1b[H");
           continue;
         case "new":
           session = await newSession(acp, root, renderer);
+          renderer.line(st.gray(`  nueva sesión ${session.id.slice(0, 8)}`));
           continue;
         case "status":
-          renderer.line(
-            `host: ${host.name} (${host.url})\nproveedor: ${relay.ready.provider} — ${init.agentInfo?.name ?? "?"} ${init.agentInfo?.version ?? ""}\n` +
-              `daemon: ${relay.ready.daemon.hostname} v${relay.ready.daemon.version}\nworkspace espejo: ${relay.ready.remoteWorkspace}\n` +
-              `sesión: ${session.id}${renderer.currentMode ? `\nmodo: ${renderer.currentMode}` : ""}`,
-          );
+          renderer.line();
+          for (const l of statusRows(ctx, session)) renderer.line(l);
           continue;
         case "modes":
-          renderModes(session.modes, renderer);
-          continue;
         case "mode":
           if (!args) {
             renderModes(session.modes, renderer);
             continue;
           }
           try {
-            await acp.agent.request(methods.agent.session.setMode, { sessionId: session.id, modeId: args.trim() });
-            renderer.currentMode = args.trim();
-            renderer.line(color.dim(`modo: ${args.trim()}`));
+            await acp.agent.request(methods.agent.session.setMode, { sessionId: session.id, modeId: args });
+            renderer.currentMode = args;
+            renderer.line(st.gray(`  modo → ${args}`));
           } catch (err) {
-            renderer.line(color.red(`no se pudo cambiar de modo: ${(err as Error).message}`));
+            renderer.line(st.red(`  ✗ no se pudo cambiar de modo: ${(err as Error).message}`));
           }
+          continue;
+        case "model":
+        case "models":
+          await modelCommand(acp, session.id, args, renderer);
           continue;
         case "commands": {
           const custom = [...commands().values()];
-          renderer.line(color.bold("Personalizados (.agents/commands):"));
-          if (!custom.length) renderer.line(color.dim("  (ninguno)"));
-          for (const c of custom) renderer.line(`  /${c.name}  ${color.dim(`${c.description} [${c.source}]`)}`);
-          renderer.line(color.bold(`Del agente (${relay.ready.provider}):`));
-          if (!renderer.availableCommands.length) renderer.line(color.dim("  (ninguno anunciado)"));
-          for (const c of renderer.availableCommands) renderer.line(`  /${c.name}  ${color.dim(c.description)}`);
+          renderer.line();
+          renderer.line(`  ${st.bold("Personalizados")} ${st.gray(".agents/commands")}`);
+          if (!custom.length) renderer.line(st.gray("    (ninguno)"));
+          for (const l of rows(custom.map((c) => [`/${c.name}`, `${c.description} ${st.gray(`[${c.source}]`)}`]), st, "    ")) renderer.line(l);
+          renderer.line(`  ${st.bold("Del agente")} ${st.gray(relay.ready.provider)}`);
+          if (!renderer.availableCommands.length) renderer.line(st.gray("    (ninguno anunciado)"));
+          for (const l of rows(renderer.availableCommands.map((c) => [`/${c.name}`, st.gray(truncate(c.description, 70))]), st, "    ")) {
+            renderer.line(l);
+          }
           continue;
         }
         case "init":
@@ -259,7 +260,7 @@ async function main() {
 
     turnActive = true;
     try {
-      await runTurn(acp, session.id, buildPrompt(promptText, process.cwd()), renderer);
+      await runTurn(acp, session.id, buildPrompt(promptText, process.cwd()), renderer, true);
     } finally {
       turnActive = false;
     }
@@ -267,6 +268,185 @@ async function main() {
 
   relay.close();
 }
+
+// ─── Presentación ────────────────────────────────────────────────────────────
+
+const shortAgentName = (name?: string) => (name ?? "?").replace(/^@[^/]+\//, "");
+
+function projectSummary(files: ProjectFile[], customCommands: number): string {
+  const hasAgents = files.some((f) => f.path === "AGENTS.md");
+  const skills = new Set(files.map((f) => /^\.agents\/skills\/([^/]+)\/SKILL\.md$/.exec(f.path)?.[1]).filter(Boolean)).size;
+  const parts = [hasAgents ? `AGENTS.md ${st.green("✓")}` : st.gray("sin AGENTS.md (usa /init)")];
+  if (skills) parts.push(`${skills} skill${skills === 1 ? "" : "s"}`);
+  if (customCommands) parts.push(`${customCommands} comando${customCommands === 1 ? "" : "s"}`);
+  return parts.join(st.gray(" · "));
+}
+
+function bridgeLabel(ready: ReadyFrame): string {
+  const b = ready.toolBridge;
+  const rg = ripgrepVersion();
+  const rgText = rg ? st.gray(` · ${rg.replace(/^ripgrep\s+/, "ripgrep ")}`) : st.yellow(" · sin ripgrep");
+  if (!b) return st.yellow("desconocido (daemon antiguo)");
+  if (!b.enabled) return st.yellow("desactivado");
+  if (b.preset === "none") return `${st.yellow("activo, sin preset")}${rgText}`;
+  return `${st.green("✓")} activo ${st.gray(`· preset ${b.preset}`)}${rgText}`;
+}
+
+function printBanner(ctx: Context, session: { id: string; modes: SessionModeState | null }, warnings: string[]) {
+  const { ready, init, host, root, files, renderer } = ctx;
+  const title = [
+    `${st.bold(st.accent("◆ agent-relay"))}  ${st.gray(`v${packageVersion()}`)}`,
+    st.gray("agentes remotos · archivos y comandos en tu máquina"),
+  ];
+  process.stdout.write(`\n${box(title, st)}\n\n`);
+
+  const model = renderer.configValue("model");
+  const mode = renderer.currentMode ?? session.modes?.currentModeId;
+  const entries: Array<[string, string]> = [
+    ["daemon", `${st.bold(ready.daemon.hostname)} ${st.gray(`· v${ready.daemon.version} · ${host.name === "url" ? host.url : `${host.name} · ${host.url}`}`)}`],
+    ["agente", `${st.bold(ready.provider)} ${st.gray(`· ${shortAgentName(init.agentInfo?.name)} ${init.agentInfo?.version ?? ""}`)}`],
+  ];
+  if (model || mode) entries.push(["modelo", [model, mode && st.gray(`modo ${mode}`)].filter(Boolean).join(st.gray(" · "))]);
+  entries.push(["puente", bridgeLabel(ready)]);
+  const summary = projectSummary(files, loadCustomCommands(root).size);
+  const room = Math.max(20, termWidth() - 14 - visibleWidth(summary) - 3);
+  entries.push(["proyecto", `${st.bold(truncateStart(tildify(root), room))} ${st.gray("·")} ${summary}`]);
+  for (const l of rows(entries, st)) process.stdout.write(`${l}\n`);
+
+  if (warnings.length) process.stdout.write("\n");
+  for (const w of warnings) process.stdout.write(`  ${st.yellow("!")} ${st.yellow(w)}\n`);
+
+  process.stdout.write(
+    `\n  ${st.gray("/help")} ${st.gray("comandos")}  ${st.gray("·")}  ${st.gray("@archivo")} ${st.gray("adjunta")}  ${st.gray("·")}  ${st.gray("Ctrl+C")} ${st.gray("cancela")}  ${st.gray("·")}  ${st.gray("/exit")} ${st.gray("sale")}\n`,
+  );
+}
+
+function printHelp(renderer: Renderer, customCount: number) {
+  renderer.line();
+  for (const l of rows(BUILTIN_COMMANDS.map(([c, d]) => [c, d]), st)) renderer.line(l);
+  renderer.line();
+  for (const l of rows(
+    [
+      ["@ruta/archivo", "Adjunta un archivo local como referencia"],
+      ["Ctrl+C", "Cancela el turno en curso (dos veces para salir)"],
+    ],
+    st,
+  )) {
+    renderer.line(l);
+  }
+  renderer.line(
+    st.gray(`\n  Otros /comandos se buscan en .agents/commands/${customCount ? ` (${customCount} disponibles, ver /commands)` : ""} o se envían al agente.`),
+  );
+}
+
+function statusRows(ctx: Context, session: { id: string; modes: SessionModeState | null }): string[] {
+  const { ready, init, host, renderer } = ctx;
+  const entries: Array<[string, string]> = [
+    ["host", `${host.name === "url" ? "RELAY_URL" : host.name} ${st.gray(host.url)}`],
+    ["daemon", `${ready.daemon.hostname} ${st.gray(`v${ready.daemon.version}`)}`],
+    ["agente", `${ready.provider} ${st.gray(`${shortAgentName(init.agentInfo?.name)} ${init.agentInfo?.version ?? ""}`)}`],
+  ];
+  const model = renderer.configValue("model");
+  if (model) entries.push(["modelo", model]);
+  const effort = renderer.configValue("effort");
+  if (effort) entries.push(["esfuerzo", effort]);
+  const mode = renderer.currentMode ?? session.modes?.currentModeId;
+  if (mode) entries.push(["modo", mode]);
+  entries.push(["puente", bridgeLabel(ready)]);
+  entries.push(["espejo", st.gray(tildify(ready.remoteWorkspace))]);
+  entries.push(["sesión", st.gray(session.id)]);
+  return rows(entries, st);
+}
+
+function printDoctor(ctx: Context, warnings: string[]) {
+  const { ready, init, host, root } = ctx;
+  const ok = st.green("✓");
+  const warn = st.yellow("!");
+  const b = ready.toolBridge;
+  const bridgeOk = b?.enabled && b.preset !== "none";
+  const rg = ripgrepVersion();
+
+  process.stdout.write(`\n  ${st.bold(st.accent("◆ agent-relay doctor"))}  ${st.gray(`v${packageVersion()}`)}\n\n`);
+  const checks: Array<[string, string, string]> = [
+    [ok, "conexión", `${host.url} ${st.gray("→")} ${ready.daemon.hostname}`],
+    [ok, "daemon", `v${ready.daemon.version}`],
+    [ok, "agente", `${shortAgentName(init.agentInfo?.name)} ${init.agentInfo?.version ?? ""} ${st.gray(`· ACP v${init.protocolVersion}`)}`],
+    [
+      bridgeOk ? ok : warn,
+      "puente",
+      !b ? "desconocido (daemon anterior a v0.4)" : !b.enabled ? "desactivado" : `activo (preset ${b.preset})`,
+    ],
+    [rg ? ok : warn, "ripgrep", rg ?? `no encontrado. ${RIPGREP_HINT}`],
+    [ok, "proyecto", tildify(root)],
+    [ok, "espejo", tildify(ready.remoteWorkspace)],
+    [ok, "proveedores", ready.availableProviders.join(", ")],
+  ];
+  const width = Math.max(...checks.map(([, k]) => k.length));
+  for (const [mark, k, v] of checks) process.stdout.write(`  ${mark} ${st.gray(k.padEnd(width))}  ${v}\n`);
+
+  const localKeys = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENCODE_API_KEY"].filter((k) => process.env[k]);
+  if (localKeys.length) warnings.push(`${localKeys.join(", ")} definidas aquí; relay no las usa, el consumo ocurre en el daemon.`);
+  if (warnings.length) process.stdout.write("\n");
+  for (const w of warnings) process.stdout.write(`  ${warn} ${st.yellow(w)}\n`);
+  process.stdout.write("\n");
+}
+
+function renderModes(modes: SessionModeState | null, renderer: Renderer) {
+  if (!modes?.availableModes?.length) {
+    renderer.line(st.gray("  El agente no anunció modos."));
+    return;
+  }
+  renderer.line();
+  const current = renderer.currentMode ?? modes.currentModeId;
+  for (const l of rows(
+    modes.availableModes.map((m) => [m.id, `${m.name}${m.id === current ? `  ${st.green("← actual")}` : ""}`]),
+    st,
+  )) {
+    renderer.line(l);
+  }
+  renderer.line(st.gray("\n  Cambia con /mode <id>"));
+}
+
+async function modelCommand(acp: ClientConnection, sessionId: string, args: string, renderer: Renderer) {
+  const opt = renderer.configOptions.find((o) => o.id === "model" || ("category" in o && o.category === "model"));
+  if (!opt || opt.type !== "select") {
+    renderer.line(st.gray("  El agente no permite elegir modelo desde el cliente."));
+    return;
+  }
+  const choices = flattenChoices(opt);
+  if (!args) {
+    renderer.line();
+    for (const l of rows(
+      choices.map((c) => [c.value, `${c.name}${c.value === opt.currentValue ? `  ${st.green("← actual")}` : ""}`]),
+      st,
+    )) {
+      renderer.line(l);
+    }
+    renderer.line(st.gray("\n  Cambia con /model <id>"));
+    return;
+  }
+  const choice = choices.find((c) => c.value === args || c.name.toLowerCase() === args.toLowerCase());
+  if (!choice) {
+    renderer.line(st.red(`  ✗ modelo desconocido: ${args}. Usa /model para ver las opciones.`));
+    return;
+  }
+  try {
+    const res = await acp.agent.request(methods.agent.session.setConfigOption, { sessionId, configId: opt.id, value: choice.value });
+    renderer.configOptions = res.configOptions;
+    renderer.line(st.gray(`  modelo → ${choice.name}`));
+  } catch (err) {
+    renderer.line(st.red(`  ✗ no se pudo cambiar el modelo: ${(err as Error).message}`));
+  }
+}
+
+function flattenChoices(opt: SessionConfigOption): Array<{ value: string; name: string }> {
+  if (opt.type !== "select") return [];
+  return (opt.options as Array<{ value?: string; name?: string; options?: Array<{ value: string; name: string }> }>)
+    .flatMap((o) => o.options ?? [o])
+    .filter((o): o is { value: string; name: string } => typeof o.value === "string");
+}
+
+// ─── Lógica ──────────────────────────────────────────────────────────────────
 
 const RIPGREP_HINT =
   process.platform === "darwin"
@@ -284,31 +464,28 @@ function ripgrepVersion(): string | null {
   return ripgrepCache;
 }
 
-/** Resume el estado del puente que anuncia el daemon y si conviene avisar. */
-function describeBridge(ready: { toolBridge?: { enabled: boolean; preset: string }; daemon: { version: string } }) {
-  const b = ready.toolBridge;
+/** Avisos sobre la conexión: puente inactivo o sin ripgrep. */
+function connectionWarnings(ctx: Context): string[] {
+  const out: string[] = [];
+  const b = ctx.ready.toolBridge;
   if (!b) {
-    return {
-      summary: "desconocido",
-      warning: `el daemon (v${ready.daemon.version}) no informa el puente de herramientas; actualízalo (git pull && npm run build) y reinícialo, o el agente trabajará sobre la máquina remota.`,
-    };
+    out.push(
+      `el daemon (v${ctx.ready.daemon.version}) no informa el puente de herramientas; actualízalo (git pull && npm run build) y reinícialo, o el agente trabajará sobre la máquina remota.`,
+    );
+  } else if (!b.enabled) {
+    out.push("el puente está desactivado: las herramientas del agente actúan sobre la máquina remota, no sobre este proyecto.");
+  } else if (b.preset === "none") {
+    out.push("el agente conserva sus herramientas internas (preset none) y puede usarlas sobre la máquina remota en lugar de este proyecto.");
   }
-  if (!b.enabled) {
-    return { summary: "desactivado", warning: "el puente está desactivado: las herramientas del agente actúan sobre la máquina remota, no sobre este proyecto." };
-  }
-  if (b.preset === "none") {
-    return {
-      summary: "activo, preset none",
-      warning: "el agente conserva sus herramientas internas (preset none) y puede usarlas sobre la máquina remota en lugar de este proyecto.",
-    };
-  }
-  return { summary: `activo (preset ${b.preset})`, warning: undefined };
+  if (b?.enabled && !ripgrepVersion()) out.push(`ripgrep no está instalado aquí; las búsquedas del agente serán más lentas. ${RIPGREP_HINT}`);
+  return out;
 }
 
 async function newSession(acp: ClientConnection, root: string, renderer: Renderer) {
   try {
     const res = await acp.agent.request(methods.agent.session.new, { cwd: root, mcpServers: [] });
     if (res.modes?.currentModeId) renderer.currentMode = res.modes.currentModeId;
+    renderer.configOptions = res.configOptions ?? [];
     return { id: res.sessionId, modes: res.modes ?? null };
   } catch (err) {
     const e = err as { code?: number; message?: string };
@@ -322,14 +499,18 @@ async function newSession(acp: ClientConnection, root: string, renderer: Rendere
   }
 }
 
-async function runTurn(acp: ClientConnection, sessionId: string, prompt: ContentBlock[], renderer: Renderer) {
+async function runTurn(acp: ClientConnection, sessionId: string, prompt: ContentBlock[], renderer: Renderer, decorate: boolean) {
+  if (decorate) renderer.beginTurn();
   try {
     const res = await acp.agent.request(methods.agent.session.prompt, { sessionId, prompt });
-    renderer.newline();
-    if (res.stopReason !== "end_turn") renderer.line(color.dim(`(fin del turno: ${res.stopReason})`));
+    if (decorate) renderer.endTurn(res.stopReason);
+    else {
+      renderer.newline();
+      if (res.stopReason !== "end_turn") renderer.line(st.gray(`(fin del turno: ${res.stopReason})`));
+    }
     return res.stopReason;
   } catch (err) {
-    renderer.line(color.red(`error: ${(err as Error).message}`));
+    renderer.line(st.red(`  ✗ ${(err as Error).message}`));
     return "error" as const;
   }
 }
@@ -347,15 +528,22 @@ function buildPrompt(text: string, cwd: string): ContentBlock[] {
   return blocks;
 }
 
-function renderModes(modes: SessionModeState | null, renderer: Renderer) {
-  if (!modes?.availableModes?.length) {
-    renderer.line(color.dim("El agente no anunció modos."));
-    return;
-  }
-  for (const m of modes.availableModes) {
-    const current = m.id === (renderer.currentMode ?? modes.currentModeId) ? color.green(" ← actual") : "";
-    renderer.line(`  ${m.id}  ${color.dim(m.name)}${current}`);
-  }
+const PERMISSION_LABEL: Record<string, string> = {
+  allow_once: "Sí, esta vez",
+  allow_always: "Sí, no volver a preguntar",
+  reject_once: "No",
+  reject_always: "No, nunca",
+};
+
+/** Lo más útil para decidir: el comando, la ruta o el patrón que pide el agente. */
+function permissionDetail(raw: unknown): string | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const r = raw as Record<string, unknown>;
+  if (typeof r.command === "string") return `${st.gray("$")} ${r.command}`;
+  const p = r.path ?? r.file_path;
+  if (typeof p === "string") return tildify(p);
+  if (typeof r.pattern === "string") return r.pattern;
+  return undefined;
 }
 
 async function requestPermission(
@@ -363,32 +551,41 @@ async function requestPermission(
   ctx: { autoApprove: boolean; interactive: boolean; ask: (q: string) => Promise<string>; renderer: Renderer },
 ): Promise<RequestPermissionResponse> {
   const { renderer } = ctx;
-  const title = req.toolCall.title ?? req.toolCall.toolCallId;
+  const rawTitle = req.toolCall.title ?? req.toolCall.toolCallId;
+  const name = rawTitle.replace(/^(?:mcp__relay__|relay_)/, "");
   const allow = req.options.find((o) => o.kind === "allow_once") ?? req.options.find((o) => o.kind === "allow_always");
   const reject = req.options.find((o) => o.kind === "reject_once") ?? req.options.find((o) => o.kind === "reject_always");
+  const denied = (): RequestPermissionResponse =>
+    reject ? { outcome: { outcome: "selected", optionId: reject.optionId } } : { outcome: { outcome: "cancelled" } };
 
   if (ctx.autoApprove && allow) {
-    renderer.line(color.dim(`  permiso aprobado automáticamente: ${title}`));
+    renderer.line(st.gray(`  ✓ permiso automático: ${name}`));
     return { outcome: { outcome: "selected", optionId: allow.optionId } };
   }
   if (!ctx.interactive) {
-    renderer.line(color.yellow(`  permiso denegado (modo no interactivo, usa --yes): ${title}`));
-    return reject ? { outcome: { outcome: "selected", optionId: reject.optionId } } : { outcome: { outcome: "cancelled" } };
+    renderer.line(st.yellow(`  ! permiso denegado (modo no interactivo, usa --yes): ${name}`));
+    return denied();
   }
 
-  renderer.line(color.yellow(`? El agente pide permiso: ${title}`));
-  req.options.forEach((o, i) => renderer.line(`  ${i + 1}) ${o.name} ${color.dim(`[${o.kind}]`)}`));
+  const detail = permissionDetail(req.toolCall.rawInput);
+  renderer.line();
+  renderer.line(`  ${st.yellow("?")} ${st.bold(name)} ${st.gray("pide permiso para ejecutarse en tu máquina")}`);
+  if (detail) renderer.line(`    ${truncate(detail, (process.stdout.columns || 80) - 6)}`);
+  renderer.line(
+    `    ${req.options.map((o, i) => `${st.accent(`[${i + 1}]`)} ${PERMISSION_LABEL[o.kind] ?? o.name}`).join("   ")}`,
+  );
   for (;;) {
-    const answer = (await ctx.ask("  elige una opción: ")).trim();
+    const answer = (await ctx.ask(`    ${st.accent("›")} `)).trim().toLowerCase();
     const idx = Number(answer) - 1;
-    if (Number.isInteger(idx) && req.options[idx]) {
-      return { outcome: { outcome: "selected", optionId: req.options[idx].optionId } };
+    if (Number.isInteger(idx) && req.options[idx]) return { outcome: { outcome: "selected", optionId: req.options[idx].optionId } };
+    if (answer === "s" || answer === "si" || answer === "sí" || answer === "y") {
+      if (allow) return { outcome: { outcome: "selected", optionId: allow.optionId } };
     }
-    if (answer === "") return reject ? { outcome: { outcome: "selected", optionId: reject.optionId } } : { outcome: { outcome: "cancelled" } };
+    if (answer === "" || answer === "n" || answer === "no") return denied();
   }
 }
 
 main().catch((err) => {
-  process.stderr.write(`${color.red("relay:")} ${(err as Error).message}\n`);
+  process.stderr.write(`${st.red("✗ relay:")} ${(err as Error).message}\n`);
   process.exit(1);
 });

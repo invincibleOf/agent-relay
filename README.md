@@ -126,6 +126,10 @@ relay-daemon           # inicia el daemon
 
 El daemon guarda el token solo como hash SHA-256 y lo compara en tiempo constante. Para sumar TLS 1.3 o mTLS, descomenta la sección `tls` (con `clientCa`, exige certificado de cliente).
 
+Al iniciar, el daemon muestra su versión, la dirección en la que escucha, el nivel de seguridad y el estado del puente de cada proveedor:
+
+![Arranque de relay-daemon](docs/relay-daemon.png)
+
 ### 2. CLI (tu máquina)
 
 ```bash
@@ -144,6 +148,8 @@ RELAY_URL=ws://servidor-casa:7443/acp RELAY_TOKEN='relay_…' relay doctor
 
 ## Uso
 
+![Sesión de relay con Claude Code](docs/relay-cli.png)
+
 ```bash
 relay                              # sesión interactiva con el proveedor por defecto
 relay -a codex                     # elige proveedor
@@ -160,11 +166,15 @@ Comandos dentro de la sesión (estilo OpenCode):
 | `/new` | Nueva sesión con el agente |
 | `/init` | Crea o mejora `AGENTS.md` (sin crear archivos de proveedor) |
 | `/commands` | Lista comandos personalizados y los que anuncia el agente |
-| `/modes`, `/mode <id>` | Lista o cambia el modo del agente |
-| `/status` | Host, proveedor, daemon, workspace espejo y sesión |
+| `/model [id]` | Muestra o cambia el modelo (si el agente lo permite) |
+| `/mode [id]` | Muestra o cambia el modo del agente |
+| `/clear` | Limpia la pantalla |
+| `/status` | Host, daemon, agente, modelo, puente, workspace espejo y sesión |
 | `/exit` | Salir |
 | `@ruta/archivo` | Adjunta un archivo local como referencia |
 | `Ctrl+C` | Cancela el turno (dos veces seguidas para salir) |
+
+Mientras el agente trabaja, cada operación sobre tu máquina aparece como una línea `⌂` (`lee`, `escribe`, `edita`, `busca`, `lista`, `ejecuta`), y cada turno termina con su duración y el número de herramientas usadas. Las respuestas se muestran con formato Markdown. Con `NO_COLOR=1`, o si la salida no es una terminal (por ejemplo con `relay -p … > respuesta.md`), el texto sale sin colores ni formato; en modo `-p` el encabezado va a stderr para que stdout quede solo con la respuesta.
 
 Cualquier otro `/comando` se busca en tus comandos personalizados; si no existe, se envía al agente (por ejemplo, los comandos propios de Claude Code).
 
@@ -220,7 +230,9 @@ Estructura:
 
 ```
 src/
-├── shared/protocol.ts     # handshake relay/hello ⇄ relay/ready y traducción de rutas
+├── shared/
+│   ├── protocol.ts        # handshake relay/hello ⇄ relay/ready y traducción de rutas
+│   └── ui.ts              # estilos, cajas y filas para la terminal (sin dependencias)
 ├── daemon/
 │   ├── main.ts            # servidor WebSocket, auth, TLS/mTLS
 │   ├── session.ts         # puente WebSocket ⇄ stdio del adaptador ACP
@@ -234,11 +246,14 @@ src/
     ├── local-tools.ts     # fs y terminales en tu máquina
     ├── project.ts         # raíz del proyecto y archivos en formato abierto
     ├── commands.ts        # comandos personalizados y /init
-    ├── render.ts, config.ts
+    ├── render.ts          # banner, herramientas, permisos y pie de cada turno
+    ├── markdown.ts        # Markdown en streaming para la terminal
+    ├── config.ts
 test/
 ├── fake-agent.ts          # agente ACP de prueba
 ├── e2e.test.ts            # daemon + CLI + agente falso de punta a punta
-└── unit.test.ts
+├── unit.test.ts
+└── markdown.test.ts      # renderizado Markdown en streaming
 ```
 
 ## Hoja de ruta
