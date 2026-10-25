@@ -6,6 +6,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { deepMerge, presetSessionMeta, presetSpawnEnv } from "../src/daemon/presets.ts";
+import { detectPreset } from "../src/daemon/config.ts";
 import { safeRelativePath } from "../src/daemon/workspace.ts";
 import { rewritePathPrefix } from "../src/shared/protocol.ts";
 
@@ -69,6 +70,16 @@ test("presetSpawnEnv de OpenCode desactiva herramientas internas y conserva la c
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("detectPreset deduce el preset desde el comando del agente", () => {
+  assert.equal(detectPreset("npx", ["-y", "@agentclientprotocol/claude-agent-acp"]), "claude-code");
+  assert.equal(detectPreset("/usr/local/bin/claude-agent-acp", []), "claude-code");
+  assert.equal(detectPreset("opencode", ["acp"]), "opencode");
+  assert.equal(detectPreset("/opt/homebrew/bin/opencode", ["acp"]), "opencode");
+  assert.equal(detectPreset("npx", ["-y", "opencode-ai@latest", "acp"]), "opencode");
+  assert.equal(detectPreset("npx", ["-y", "@zed-industries/codex-acp"]), "none");
+  assert.equal(detectPreset("node", ["fake-agent.ts"]), "none");
 });
 
 test("displayCommand muestra el comando sin el envoltorio del shell", () => {

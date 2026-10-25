@@ -50,6 +50,8 @@ export interface ReadyFrame {
   /** Ruta del workspace espejo en la máquina remota (informativo). */
   remoteWorkspace: string;
   daemon: { version: string; hostname: string };
+  /** Estado del puente de herramientas (ausente en daemons anteriores a v0.4). */
+  toolBridge?: { enabled: boolean; preset: string };
 }
 
 export interface ErrorFrame {

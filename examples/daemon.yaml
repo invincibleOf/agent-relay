@@ -39,6 +39,7 @@ providers:
         content: "@AGENTS.md\n"
     # Puente de herramientas: Claude usa read/write/edit/bash/grep/glob del
     # daemon, que se ejecutan en tu máquina; sus herramientas internas se desactivan.
+    # (Si omites toolBridge, el preset se deduce del comando: preset: auto.)
     toolBridge:
       enabled: true
       preset: claude-code

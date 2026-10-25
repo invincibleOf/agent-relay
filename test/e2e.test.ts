@@ -187,6 +187,7 @@ describe("relay de punta a punta con un agente falso", () => {
     const r = await runCli(["--url", `ws://127.0.0.1:${port}/acp`, "-a", "fake-sin-puente", "-p", "PUENTE", "--yes"]);
     assert.equal(r.code, 0, r.stderr + r.stdout);
     assert.match(r.stdout, /^MCP_URL=no$/m);
+    assert.match(r.stdout, /aviso: el puente está desactivado/);
     assert.match(r.stdout, /^DISALLOWED_READ=no$/m);
   });
 
@@ -194,6 +195,8 @@ describe("relay de punta a punta con un agente falso", () => {
     const r = await runCli(["doctor", "--url", `ws://127.0.0.1:${port}/acp`]);
     assert.equal(r.code, 0, r.stderr);
     assert.match(r.stdout, /agente: fake-agent 0\.0\.1/);
+    assert.match(r.stdout, /puente de herramientas: activo \(preset claude-code\)/);
+    assert.doesNotMatch(r.stdout, /aviso: el /);
     assert.match(r.stdout, /workspace espejo: /);
   });
 });

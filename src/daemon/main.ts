@@ -74,7 +74,10 @@ function main() {
   if (command === "check") {
     process.stdout.write(
       `Configuración válida: ${configPath}\n` +
-        `Proveedores: ${Object.keys(config.providers).join(", ")} (por defecto: ${config.defaultProvider})\n` +
+        `Proveedores (por defecto: ${config.defaultProvider}):\n` +
+        Object.entries(config.providers)
+          .map(([n, p]) => `  - ${n}: puente ${p.toolBridge.enabled ? `activo, preset ${p.toolBridge.preset}` : "desactivado"}\n`)
+          .join("") +
         `Escucha en ${config.tls ? "wss" : "ws"}://${config.listen.host}:${config.listen.port}` +
         `${config.tls?.clientCa ? " con mTLS" : ""}\n`,
     );
@@ -134,6 +137,10 @@ async function serve(config: DaemonConfig) {
         (config.tls?.clientCa ? " (mTLS)" : config.tls ? " (TLS)" : " (sin TLS: úsalo solo dentro de Tailscale/WireGuard o la LAN)"),
     );
     log(`proveedores: ${Object.keys(config.providers).join(", ")} · por defecto: ${config.defaultProvider}`);
+    for (const [n, p] of Object.entries(config.providers)) {
+      if (!p.toolBridge.enabled) log(`aviso: ${n} tiene el puente desactivado; sus herramientas actuarán sobre esta máquina`);
+      else if (p.toolBridge.preset === "none") log(`aviso: ${n} conserva sus herramientas internas (preset none); puede trabajar sobre esta máquina en vez de la del CLI`);
+    }
   });
 
   const stop = () => {
@@ -196,6 +203,7 @@ function onConnection(ws: WebSocket, peer: string, config: DaemonConfig, hub: To
       availableProviders: Object.keys(config.providers),
       remoteWorkspace: remoteRoot,
       daemon: { version: packageVersion(), hostname: hostname() },
+      toolBridge: { enabled: provider.toolBridge.enabled, preset: provider.toolBridge.preset },
     });
 
     bridgeSession({

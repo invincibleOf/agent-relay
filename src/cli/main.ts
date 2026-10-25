@@ -97,6 +97,8 @@ async function main() {
       color.dim(` · host ${host.name} · proveedor ${relay.ready.provider} · consumo de IA en el daemon`),
   );
   renderer.line(color.dim(`proyecto ${root} · ${files.length} archivo(s) en formato abierto sincronizados`));
+  const bridgeStatus = describeBridge(relay.ready);
+  if (bridgeStatus.warning) renderer.line(color.yellow(`aviso: ${bridgeStatus.warning}`));
 
   let rl: Interface | undefined;
   const ask = async (q: string) => {
@@ -133,6 +135,8 @@ async function main() {
   if (subcommand === "doctor") {
     renderer.line(`agente: ${init.agentInfo?.name ?? "?"} ${init.agentInfo?.version ?? ""}`);
     renderer.line(`protocolo ACP: v${init.protocolVersion}`);
+    renderer.line(`daemon: ${relay.ready.daemon.hostname} v${relay.ready.daemon.version}`);
+    renderer.line(`puente de herramientas: ${bridgeStatus.summary}`);
     renderer.line(`workspace espejo: ${relay.ready.remoteWorkspace}`);
     renderer.line(`proveedores en el daemon: ${relay.ready.availableProviders.join(", ")}`);
     const localKeys = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENCODE_API_KEY"].filter((k) => process.env[k]);
@@ -252,6 +256,27 @@ async function main() {
   }
 
   relay.close();
+}
+
+/** Resume el estado del puente que anuncia el daemon y si conviene avisar. */
+function describeBridge(ready: { toolBridge?: { enabled: boolean; preset: string }; daemon: { version: string } }) {
+  const b = ready.toolBridge;
+  if (!b) {
+    return {
+      summary: "desconocido",
+      warning: `el daemon (v${ready.daemon.version}) no informa el puente de herramientas; actualízalo (git pull && npm run build) y reinícialo, o el agente trabajará sobre la máquina remota.`,
+    };
+  }
+  if (!b.enabled) {
+    return { summary: "desactivado", warning: "el puente está desactivado: las herramientas del agente actúan sobre la máquina remota, no sobre este proyecto." };
+  }
+  if (b.preset === "none") {
+    return {
+      summary: "activo, preset none",
+      warning: "el agente conserva sus herramientas internas (preset none) y puede usarlas sobre la máquina remota en lugar de este proyecto.",
+    };
+  }
+  return { summary: `activo (preset ${b.preset})`, warning: undefined };
 }
 
 async function newSession(acp: ClientConnection, root: string, renderer: Renderer) {

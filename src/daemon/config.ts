@@ -34,12 +34,16 @@ const Provider = z.object({
   toolBridge: z
     .object({
       enabled: z.boolean().default(true),
-      /** Cómo desactivar las herramientas internas del agente ("none" = no tocarlas). */
-      preset: z.enum(["claude-code", "opencode", "none"]).default("none"),
+      /**
+       * Cómo desactivar las herramientas internas del agente. "auto" lo deduce
+       * del comando (claude-agent-acp → claude-code, opencode → opencode).
+       * "none" = no tocarlas (el agente podría seguir trabajando en la remota).
+       */
+      preset: z.enum(["auto", "claude-code", "opencode", "none"]).default("auto"),
       /** `_meta` adicional que se mezcla en session/new, load y resume. */
       sessionMeta: z.record(z.string(), z.unknown()).default({}),
     })
-    .default({ enabled: true, preset: "none", sessionMeta: {} }),
+    .default({ enabled: true, preset: "auto", sessionMeta: {} }),
 });
 
 const DaemonConfig = z.object({
@@ -67,8 +71,20 @@ const DaemonConfig = z.object({
   providers: z.record(z.string(), Provider),
 });
 
-export type DaemonConfig = z.infer<typeof DaemonConfig>;
-export type ProviderConfig = z.infer<typeof Provider>;
+type ParsedProvider = z.infer<typeof Provider>;
+type ResolvedPreset = Exclude<ParsedProvider["toolBridge"]["preset"], "auto">;
+export type ProviderConfig = Omit<ParsedProvider, "toolBridge"> & {
+  toolBridge: Omit<ParsedProvider["toolBridge"], "preset"> & { preset: ResolvedPreset };
+};
+export type DaemonConfig = Omit<z.infer<typeof DaemonConfig>, "providers"> & { providers: Record<string, ProviderConfig> };
+
+/** Deduce el preset a partir del comando con el que se lanza el agente. */
+export function detectPreset(command: string, args: string[]): ResolvedPreset {
+  const line = [command, ...args].map((a) => a.split(/[\\/]/).pop() ?? a).join(" ");
+  if (/claude-(agent|code)-acp/.test(line)) return "claude-code";
+  if (/(^|\s|@|-)opencode(-ai)?(\s|@|$)/.test(line) || /^opencode\b/.test(line)) return "opencode";
+  return "none";
+}
 
 export function defaultDaemonConfigPath(): string {
   return path.join(process.env.XDG_CONFIG_HOME ?? path.join(homedir(), ".config"), "agent-relay", "daemon.yaml");
@@ -76,9 +92,14 @@ export function defaultDaemonConfigPath(): string {
 
 export function loadDaemonConfig(file: string): DaemonConfig {
   const raw = YAML.parse(readFileSync(file, "utf8"));
-  const cfg = DaemonConfig.parse(raw);
-  if (!cfg.providers[cfg.defaultProvider]) {
-    throw new Error(`defaultProvider "${cfg.defaultProvider}" no está definido en providers`);
+  const parsed = DaemonConfig.parse(raw);
+  if (!parsed.providers[parsed.defaultProvider]) {
+    throw new Error(`defaultProvider "${parsed.defaultProvider}" no está definido en providers`);
   }
-  return cfg;
+  const providers: Record<string, ProviderConfig> = {};
+  for (const [name, p] of Object.entries(parsed.providers)) {
+    const preset = p.toolBridge.preset === "auto" ? detectPreset(p.command, p.args) : p.toolBridge.preset;
+    providers[name] = { ...p, toolBridge: { ...p.toolBridge, preset } };
+  }
+  return { ...parsed, providers };
 }

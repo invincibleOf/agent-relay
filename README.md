@@ -70,7 +70,7 @@ relay-daemon gen-token                      # copia el token y el hash
 mkdir -p ~/.config/agent-relay
 cp examples/daemon.yaml ~/.config/agent-relay/daemon.yaml
 # Edita: listen.host = 127.0.0.1 para la prueba local, pega el hash en auth.tokenSha256
-relay-daemon check && relay-daemon
+relay-daemon check && relay-daemon         # 'check' muestra el preset de cada proveedor
 ```
 
 **4. En otra terminal, desde cualquier proyecto:**
@@ -78,7 +78,7 @@ relay-daemon check && relay-daemon
 ```bash
 cd ~/algun-proyecto
 export RELAY_URL=ws://127.0.0.1:7443/acp RELAY_TOKEN='relay_…'
-relay doctor -a opencode                    # o -a claude
+relay doctor -a opencode                    # o -a claude; debe decir "puente de herramientas: activo"
 relay -a opencode
 ```
 
@@ -175,6 +175,16 @@ mi-proyecto/
 ### Comandos personalizados
 
 `.agents/commands/<nombre>.md` (del proyecto) o `~/.config/agent-relay/commands/<nombre>.md` (globales). Frontmatter opcional con `description`; el cuerpo es la plantilla del prompt, con `$ARGUMENTS` (todo el texto) y `$1…$9` (por palabra). El CLI los expande localmente, así que funcionan igual con cualquier proveedor. Hay un ejemplo en [`examples/commands/revisar.md`](examples/commands/revisar.md).
+
+## Solución de problemas
+
+**El agente dice que el proyecto está vacío o solo ve `.relay-manifest.json`.** Está usando sus herramientas internas sobre el workspace espejo en vez de las del puente. Corre `relay doctor` y revisa la línea `puente de herramientas`:
+
+- `activo (preset claude-code)` u `activo (preset opencode)`: correcto. Las herramientas del agente deben aparecer como `mcp__relay__…` o `relay_…`.
+- `desconocido`: el daemon es anterior a la v0.4. Actualiza y reinícialo: `git pull && npm install && npm run build`, luego detén y vuelve a iniciar `relay-daemon`.
+- `activo, preset none` o `desactivado`: revisa `toolBridge` en `daemon.yaml`. Desde la v0.4, si lo omites, el preset se deduce del comando del agente (`preset: auto`).
+
+**Aviso por `.claude`, `.codex` u `.opencode` en el proyecto.** No impide trabajar: el CLI solo sincroniza `AGENTS.md` y `.agents/`. Mueve a esos formatos lo que quieras que el agente use.
 
 ## Seguridad
 
