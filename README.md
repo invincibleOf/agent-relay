@@ -73,18 +73,28 @@ cp examples/daemon.yaml ~/.config/agent-relay/daemon.yaml
 relay-daemon check && relay-daemon         # 'check' muestra el preset de cada proveedor
 ```
 
-**4. En otra terminal, desde cualquier proyecto:**
+**4. Instala ripgrep en la máquina del CLI.** Las herramientas `grep` y `glob` del agente se ejecutan en tu computador, no en la remota, y usan ripgrep si está disponible: es mucho más rápido y respeta `.gitignore`. Sin él funcionan igual, pero con `grep` y `find`.
+
+```bash
+brew install ripgrep                       # macOS
+sudo apt install ripgrep                   # Debian/Ubuntu
+winget install BurntSushi.ripgrep.MSVC     # Windows
+rg --version                               # verifica la instalación
+```
+
+**5. En otra terminal, desde cualquier proyecto:**
 
 ```bash
 cd ~/algun-proyecto
 export RELAY_URL=ws://127.0.0.1:7443/acp RELAY_TOKEN='relay_…'
 relay doctor -a opencode                    # o -a claude; debe decir "puente de herramientas: activo"
+                                            # y "ripgrep en esta máquina: ripgrep 14.x"
 relay -a opencode
 ```
 
-Pídele algo como *"lee el README, crea notas.txt con un resumen y ejecuta ls"*. Verás líneas `⌂ local lee/escribe/ejecuta` y el archivo aparecerá en tu proyecto.
+Pídele algo como *"¿de qué trata este proyecto?"* o *"crea notas.txt con un resumen del README"*. Verás líneas `⌂ local lee/escribe/ejecuta` y los cambios aparecerán en tu proyecto. Para explorar, el agente usa `read`, `grep` y `glob`, que no piden permiso; solo te preguntará antes de escribir, editar o ejecutar comandos.
 
-**5. Separa las máquinas.** Instala Tailscale en ambas, cambia `listen.host` a la IP de Tailscale de la remota y `RELAY_URL` a `ws://<esa-ip>:7443/acp`. En la máquina local solo necesitas el CLI (pasos 1 y 4).
+**6. Separa las máquinas.** Instala Tailscale en ambas, cambia `listen.host` a la IP de Tailscale de la remota y `RELAY_URL` a `ws://<esa-ip>:7443/acp`. En la máquina local solo necesitas el CLI y ripgrep (pasos 1, 4 y 5); en la remota no hace falta ripgrep.
 
 ## Instalación
 
@@ -203,6 +213,7 @@ npm run typecheck
 npm test                 # pruebas unitarias + e2e con un agente ACP falso
 npm run dev:daemon -- --config examples/daemon.yaml
 npm run dev:cli -- doctor
+RELAY_DEBUG_MCP=1 relay-daemon   # registra cada llamada MCP del agente al puente
 ```
 
 Estructura:

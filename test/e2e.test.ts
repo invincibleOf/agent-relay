@@ -161,6 +161,8 @@ describe("relay de punta a punta con un agente falso", () => {
     // Lecturas: relativas y absolutas del espejo llegan a tu disco.
     assert.equal(JSON.parse(get("B_READ")!), "     1\thola desde el disco local");
     assert.equal(JSON.parse(get("B_READ_ABS")!), "     1\thola desde el disco local");
+    assert.equal(JSON.parse(get("B_READ_ALIAS")!), "     1\thola desde el disco local");
+    assert.equal(get("B_READ_SIN_RUTA"), "error");
 
     // Escritura y edición sobre el proyecto local; el edit ambiguo se rechaza.
     assert.equal(get("B_WRITE"), "ok");
@@ -196,6 +198,7 @@ describe("relay de punta a punta con un agente falso", () => {
     assert.equal(r.code, 0, r.stderr);
     assert.match(r.stdout, /agente: fake-agent 0\.0\.1/);
     assert.match(r.stdout, /puente de herramientas: activo \(preset claude-code\)/);
+    assert.match(r.stdout, /ripgrep en esta máquina: /);
     assert.doesNotMatch(r.stdout, /aviso: el /);
     assert.match(r.stdout, /workspace espejo: /);
   });

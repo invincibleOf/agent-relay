@@ -46,6 +46,8 @@ async function bridgeReport(): Promise<string[]> {
   // Ruta relativa y ruta absoluta del espejo: ambas deben llegar al disco local.
   out.push(`B_READ=${JSON.stringify((await tool("read", { path: "README.md" })).text)}`);
   out.push(`B_READ_ABS=${JSON.stringify((await tool("read", { path: path.join(sessionCwd, "README.md") })).text)}`);
+  out.push(`B_READ_ALIAS=${JSON.stringify((await tool("read", { file_path: path.join(sessionCwd, "README.md") })).text)}`);
+  out.push(`B_READ_SIN_RUTA=${(await tool("read", {})).isError ? "error" : "ok"}`);
   out.push(`B_WRITE=${(await tool("write", { path: "src/nuevo.ts", content: "export const a = 1;\nexport const b = 1;\n" })).isError ? "error" : "ok"}`);
   out.push(`B_EDIT_AMBIGUO=${(await tool("edit", { path: "src/nuevo.ts", old_string: "= 1", new_string: "= 2" })).isError ? "error" : "ok"}`);
   out.push(`B_EDIT=${(await tool("edit", { path: "src/nuevo.ts", old_string: "const b = 1", new_string: "const b = 2" })).isError ? "error" : "ok"}`);

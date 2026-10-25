@@ -13,7 +13,11 @@ export const BRIDGE_SERVER_NAME = "relay";
 export const READ_ONLY_TOOLS = ["read", "grep", "glob"] as const;
 
 export const BRIDGE_INSTRUCTIONS = `The user's project lives on a different machine than the one you run on. Your working directory is only a mirror that holds AGENTS.md and the project's skills; the real source files are not there.
-Use the tools of the "${BRIDGE_SERVER_NAME}" MCP server for every file and shell operation: read, write, edit, grep, glob and bash. They act on the user's real project. Paths may be absolute (under your working directory) or relative to it; they are mapped to the user's project automatically.`;
+Use the tools of the "${BRIDGE_SERVER_NAME}" MCP server for every file and shell operation. They act on the user's real project. Paths may be absolute (under your working directory) or relative to it; they are mapped to the user's project automatically.
+Choose the tool by purpose:
+- To explore or understand code, use only read, glob and grep. They run without asking the user for approval. Do not use bash for cat, head, tail, ls, find, grep, rg or wc.
+- To change files, use edit for targeted changes and write for new files or full rewrites. Do not use bash with sed, echo or redirections to modify files.
+- Use bash only to run programs: builds, tests, linters, package managers, git and the project's own scripts. Every bash call needs the user's approval, so batch related steps and avoid speculative commands.`;
 
 export type PresetName = "claude-code" | "opencode" | "none";
 

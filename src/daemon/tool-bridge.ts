@@ -82,6 +82,7 @@ export class ToolBridgeHub {
     let body: unknown;
     try {
       body = JSON.parse(await readBody(req));
+      if (process.env.RELAY_DEBUG_MCP) target.log(`MCP ← ${JSON.stringify(body).slice(0, 400)}`);
     } catch {
       res.writeHead(400).end();
       return;
@@ -154,15 +155,17 @@ export function buildMcpServer(t: BridgeTarget): McpServer {
     "read",
     {
       description:
-        "Read a text file from the user's project. Returns lines prefixed with their line number (cat -n format). Use offset/limit for large files.",
+        "Read a text file from the user's project (no approval needed; prefer it over bash cat/head/tail). Returns lines prefixed with their line number (cat -n format). Use offset/limit for large files.",
       inputSchema: {
-        path: z.string().describe("Absolute path or path relative to the working directory"),
+        path: z.string().optional().describe("Absolute path or path relative to the working directory"),
+        file_path: z.string().optional().describe("Alias of path"),
         offset: z.number().int().positive().optional().describe("1-based line to start from"),
         limit: z.number().int().positive().optional().describe(`Number of lines to read (default ${DEFAULT_READ_LINES})`),
       },
       annotations: { readOnlyHint: true },
     },
-    guarded("read", async ({ path: p, offset, limit }) => {
+    guarded("read", async ({ path: pathArg, file_path, offset, limit }) => {
+      const p = requirePath(pathArg, file_path);
       const start = offset ?? 1;
       const { content } = await io.fs<{ content: string }>("fs/read_text_file", {
         path: io.toLocal(p),
@@ -185,12 +188,14 @@ export function buildMcpServer(t: BridgeTarget): McpServer {
     {
       description: "Create or overwrite a file in the user's project with the given content. Parent directories are created.",
       inputSchema: {
-        path: z.string().describe("Absolute path or path relative to the working directory"),
+        path: z.string().optional().describe("Absolute path or path relative to the working directory"),
+        file_path: z.string().optional().describe("Alias of path"),
         content: z.string(),
       },
       annotations: { destructiveHint: true },
     },
-    guarded("write", async ({ path: p, content }) => {
+    guarded("write", async ({ path: pathArg, file_path, content }) => {
+      const p = requirePath(pathArg, file_path);
       await io.fs("fs/write_text_file", { path: io.toLocal(p), content });
       return ok(`Escrito ${p} (${content.length} caracteres)`);
     }),
@@ -202,14 +207,16 @@ export function buildMcpServer(t: BridgeTarget): McpServer {
       description:
         "Replace an exact string in a file of the user's project. old_string must match exactly (no line-number prefixes) and be unique unless replace_all is true.",
       inputSchema: {
-        path: z.string(),
+        path: z.string().optional(),
+        file_path: z.string().optional().describe("Alias of path"),
         old_string: z.string().min(1),
         new_string: z.string(),
         replace_all: z.boolean().optional(),
       },
       annotations: { destructiveHint: true },
     },
-    guarded("edit", async ({ path: p, old_string, new_string, replace_all }) => {
+    guarded("edit", async ({ path: pathArg, file_path, old_string, new_string, replace_all }) => {
+      const p = requirePath(pathArg, file_path);
       const local = io.toLocal(p);
       const { content } = await io.fs<{ content: string }>("fs/read_text_file", { path: local });
       const count = content.split(old_string).length - 1;
@@ -227,15 +234,16 @@ export function buildMcpServer(t: BridgeTarget): McpServer {
     "bash",
     {
       description:
-        "Run a shell command on the user's machine, in the project root (POSIX sh, or cmd.exe on Windows). Returns combined stdout/stderr and the exit code.",
+        "Run a program on the user's machine, in the project root (POSIX sh, or cmd.exe on Windows): builds, tests, linters, package managers, git. Requires the user's approval. Do not use it to read, list or search files (use read, glob, grep) or to modify files (use edit, write). Returns combined stdout/stderr and the exit code.",
       inputSchema: {
         command: z.string().min(1),
         timeout_ms: z.number().int().positive().max(MAX_BASH_TIMEOUT_MS).optional(),
+        timeout: z.number().int().positive().max(MAX_BASH_TIMEOUT_MS).optional().describe("Alias of timeout_ms"),
       },
       annotations: { destructiveHint: true, openWorldHint: true },
     },
-    guarded("bash", async ({ command, timeout_ms }) => {
-      const r = await io.shell(command, timeout_ms ?? DEFAULT_BASH_TIMEOUT_MS);
+    guarded("bash", async ({ command, timeout_ms, timeout }) => {
+      const r = await io.shell(command, timeout_ms ?? timeout ?? DEFAULT_BASH_TIMEOUT_MS);
       const status = r.timedOut ? "tiempo agotado, proceso detenido" : `código de salida ${r.exitCode ?? r.signal ?? "?"}`;
       return ok(`${io.toRemoteText(r.output) || "(sin salida)"}\n[${status}${r.truncated ? ", salida truncada" : ""}]`);
     }),
@@ -245,7 +253,7 @@ export function buildMcpServer(t: BridgeTarget): McpServer {
     "grep",
     {
       description:
-        "Search file contents in the user's project with a regular expression (ripgrep if installed, otherwise grep). Returns path:line:text matches.",
+        "Search file contents in the user's project with a regular expression (no approval needed; prefer it over bash grep/rg). Uses ripgrep if installed, otherwise grep. Returns path:line:text matches.",
       inputSchema: {
         pattern: z.string().min(1),
         path: z.string().optional().describe("Folder or file to search (default: project root)"),
@@ -272,7 +280,8 @@ export function buildMcpServer(t: BridgeTarget): McpServer {
   server.registerTool(
     "glob",
     {
-      description: 'List files in the user\'s project matching a glob pattern such as "**/*.ts" (respects .gitignore when ripgrep is installed).',
+      description:
+        'List files in the user\'s project matching a glob pattern such as "**/*" or "src/**/*.java" (no approval needed; prefer it over bash ls/find). Respects .gitignore when ripgrep is installed.',
       inputSchema: {
         pattern: z.string().min(1),
         path: z.string().optional().describe("Folder to search (default: project root)"),
@@ -293,6 +302,16 @@ export function buildMcpServer(t: BridgeTarget): McpServer {
   );
 
   return server;
+}
+
+/**
+ * Los agentes suelen usar los nombres de parámetro de sus herramientas internas
+ * (p. ej. `file_path` en Claude Code). Se aceptan ambos para no gastar turnos.
+ */
+function requirePath(pathArg?: string, filePath?: string): string {
+  const p = pathArg ?? filePath;
+  if (!p) throw new Error("falta el parámetro path");
+  return p;
 }
 
 /** Comillas simples POSIX. */

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { spawnSync } from "node:child_process";
 import { existsSync, statSync } from "node:fs";
 import path from "node:path";
 import { createInterface, type Interface } from "node:readline/promises";
@@ -99,6 +100,9 @@ async function main() {
   renderer.line(color.dim(`proyecto ${root} · ${files.length} archivo(s) en formato abierto sincronizados`));
   const bridgeStatus = describeBridge(relay.ready);
   if (bridgeStatus.warning) renderer.line(color.yellow(`aviso: ${bridgeStatus.warning}`));
+  if (subcommand !== "doctor" && bridgeStatus.summary.startsWith("activo") && !ripgrepVersion()) {
+    renderer.line(color.dim(`nota: ripgrep no está instalado aquí; las búsquedas del agente serán más lentas. ${RIPGREP_HINT}`));
+  }
 
   let rl: Interface | undefined;
   const ask = async (q: string) => {
@@ -139,6 +143,12 @@ async function main() {
     renderer.line(`puente de herramientas: ${bridgeStatus.summary}`);
     renderer.line(`workspace espejo: ${relay.ready.remoteWorkspace}`);
     renderer.line(`proveedores en el daemon: ${relay.ready.availableProviders.join(", ")}`);
+    const rg = ripgrepVersion();
+    renderer.line(
+      rg
+        ? `ripgrep en esta máquina: ${rg}`
+        : color.yellow(`ripgrep en esta máquina: no encontrado. grep y glob usarán grep/find (más lentos, sin .gitignore). ${RIPGREP_HINT}`),
+    );
     const localKeys = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENCODE_API_KEY"].filter((k) => process.env[k]);
     if (localKeys.length) {
       renderer.line(color.yellow(`nota: ${localKeys.join(", ")} definidas aquí; relay no las usa, el consumo ocurre en el daemon.`));
@@ -256,6 +266,22 @@ async function main() {
   }
 
   relay.close();
+}
+
+const RIPGREP_HINT =
+  process.platform === "darwin"
+    ? "Instálalo con: brew install ripgrep"
+    : process.platform === "win32"
+      ? "Instálalo con: winget install BurntSushi.ripgrep.MSVC"
+      : "Instálalo con: sudo apt install ripgrep (o el gestor de tu distribución)";
+
+let ripgrepCache: string | null | undefined;
+/** Versión de ripgrep instalada en esta máquina (donde corren grep y glob del puente). */
+function ripgrepVersion(): string | null {
+  if (ripgrepCache !== undefined) return ripgrepCache;
+  const r = spawnSync("rg", ["--version"], { encoding: "utf8" });
+  ripgrepCache = r.status === 0 ? (r.stdout.split("\n")[0]?.trim() ?? "rg") : null;
+  return ripgrepCache;
 }
 
 /** Resume el estado del puente que anuncia el daemon y si conviene avisar. */
