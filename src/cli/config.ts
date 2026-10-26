@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import YAML from "yaml";
@@ -8,7 +8,7 @@ const expandHome = (p: string) => (p.startsWith("~") ? path.join(homedir(), p.sl
 
 const Host = z.object({
   /** ws://… o wss://…, normalmente la IP/nombre de Tailscale del daemon, terminando en /acp. */
-  url: z.string().regex(/^wss?:\/\//),
+  url: z.string().regex(/^wss?:\/\//, "debe empezar con ws:// o wss:// y terminar en /acp, p. ej. ws://100.x.y.z:7443/acp"),
   /** Token en texto plano (mejor usar tokenEnv o tokenFile). */
   token: z.string().optional(),
   /** Variable de entorno de donde leer el token. */
@@ -48,9 +48,48 @@ export function defaultCliConfigPath(): string {
   return path.join(configDir(), "cli.yaml");
 }
 
-export function loadCliConfig(file: string): CliConfig {
-  if (!existsSync(file)) return CliConfig.parse({});
-  return CliConfig.parse(YAML.parse(readFileSync(file, "utf8")) ?? {});
+/** Información sobre de dónde salió la configuración, para dar errores útiles. */
+export interface ConfigSource {
+  path: string;
+  exists: boolean;
+  /** Claves de primer nivel que no se reconocen (p. ej. "host" en vez de "hosts"). */
+  unknownKeys: string[];
+  /** Archivos parecidos en la misma carpeta (p. ej. cli.yaml.txt de TextEdit). */
+  similarFiles: string[];
+}
+export type LoadedCliConfig = CliConfig & { source: ConfigSource };
+
+const KNOWN_KEYS = new Set(["defaultHost", "hosts", "permissions"]);
+
+export function loadCliConfig(file: string): LoadedCliConfig {
+  const exists = existsSync(file);
+  let similarFiles: string[] = [];
+  try {
+    const base = path.basename(file, path.extname(file));
+    similarFiles = readdirSync(path.dirname(file)).filter(
+      (f) => f !== path.basename(file) && f.toLowerCase().startsWith(base.toLowerCase()),
+    );
+  } catch {
+    /* la carpeta no existe */
+  }
+  if (!exists) return { ...CliConfig.parse({}), source: { path: file, exists, unknownKeys: [], similarFiles } };
+
+  let raw: unknown;
+  try {
+    raw = YAML.parse(readFileSync(file, "utf8")) ?? {};
+  } catch (err) {
+    throw new Error(`${file} no es YAML válido: ${(err as Error).message.split("\n")[0]} (usa espacios, no tabs, para indentar)`);
+  }
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new Error(`${file} debe ser un objeto YAML con las claves defaultHost, hosts y permissions`);
+  }
+  const unknownKeys = Object.keys(raw).filter((k) => !KNOWN_KEYS.has(k));
+  const parsed = CliConfig.safeParse(raw);
+  if (!parsed.success) {
+    const issues = parsed.error.issues.map((i) => `${i.path.join(".") || "(raíz)"}: ${i.message}`).join("; ");
+    throw new Error(`${file} tiene errores: ${issues}`);
+  }
+  return { ...parsed.data, source: { path: file, exists, unknownKeys, similarFiles } };
 }
 
 export interface ResolvedHost {
@@ -67,7 +106,7 @@ export interface ResolvedHost {
  * Resuelve el host a usar. Prioridad: --url/RELAY_URL, luego --host, luego defaultHost.
  * El token nunca se toma de un proveedor de IA: solo autentica contra tu daemon.
  */
-export function resolveHost(cfg: CliConfig, hostName?: string, urlOverride?: string): ResolvedHost {
+export function resolveHost(cfg: LoadedCliConfig, hostName?: string, urlOverride?: string): ResolvedHost {
   const url = urlOverride ?? process.env.RELAY_URL;
   if (url) {
     const token = process.env.RELAY_TOKEN;
@@ -76,11 +115,12 @@ export function resolveHost(cfg: CliConfig, hostName?: string, urlOverride?: str
   }
 
   const name = hostName ?? cfg.defaultHost ?? Object.keys(cfg.hosts)[0];
-  if (!name) {
-    throw new Error(`No hay hosts configurados. Crea ${defaultCliConfigPath()} (ver examples/cli.yaml) o usa RELAY_URL + RELAY_TOKEN.`);
-  }
+  if (!name) throw new Error(noHostsMessage(cfg.source));
   const host = cfg.hosts[name];
-  if (!host) throw new Error(`Host "${name}" no existe en ${defaultCliConfigPath()}. Disponibles: ${Object.keys(cfg.hosts).join(", ") || "ninguno"}`);
+  if (!host) {
+    if (Object.keys(cfg.hosts).length === 0) throw new Error(noHostsMessage(cfg.source));
+    throw new Error(`Host "${name}" no existe en ${cfg.source.path}. Disponibles: ${Object.keys(cfg.hosts).join(", ")}`);
+  }
 
   const token =
     host.token ??
@@ -93,7 +133,7 @@ export function resolveHost(cfg: CliConfig, hostName?: string, urlOverride?: str
           `Ejecuta: export ${host.tokenEnv}='relay_…' (o agrégalo a tu ~/.zshrc / ~/.bashrc).`,
       );
     }
-    throw new Error(`El host "${name}" no tiene token: define token, tokenEnv o tokenFile en ${defaultCliConfigPath()}`);
+    throw new Error(`El host "${name}" no tiene token: define token, tokenEnv o tokenFile en ${cfg.source.path}`);
   }
 
   return {
@@ -105,4 +145,16 @@ export function resolveHost(cfg: CliConfig, hostName?: string, urlOverride?: str
     key: host.key ? readFileSync(host.key) : undefined,
     provider: host.provider,
   };
+}
+
+function noHostsMessage(src: ConfigSource): string {
+  const fallback = "o usa RELAY_URL + RELAY_TOKEN sin archivo de configuración.";
+  if (!src.exists) {
+    const similar = src.similarFiles.length
+      ? ` Encontré ${src.similarFiles.map((f) => `"${f}"`).join(", ")} en esa carpeta: renómbralo a "${path.basename(src.path)}".`
+      : "";
+    return `No existe ${src.path}.${similar} Crea el archivo (ver examples/cli.yaml) ${fallback}`;
+  }
+  const keys = src.unknownKeys.length ? ` Claves no reconocidas: ${src.unknownKeys.join(", ")} (¿quisiste decir "hosts"?).` : "";
+  return `${src.path} existe pero no define ningún host bajo "hosts:".${keys} Revisa que cada host esté indentado con espacios debajo de "hosts:", ${fallback}`;
 }
