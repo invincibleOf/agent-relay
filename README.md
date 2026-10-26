@@ -54,7 +54,7 @@ Las rutas se traducen en ambos sentidos, así que el agente sigue viendo su work
 
 Puedes probarlo primero con el daemon y el CLI en **la misma máquina**, y después separarlos.
 
-**1. Instala y compila** (en la máquina que hará de remota):
+**1. Instala y compila.** Para esta prueba, daemon y CLI van en la misma máquina. Cuando las separes, repite este paso en ambas: `npm link` es lo que instala los comandos `relay` y `relay-daemon`.
 
 ```bash
 git clone https://github.com/invincibleOf/agent-relay && cd agent-relay
@@ -94,7 +94,7 @@ relay -a opencode
 
 Pídele algo como *"¿de qué trata este proyecto?"* o *"crea notas.txt con un resumen del README"*. Verás líneas `⌂ local lee/escribe/ejecuta` y los cambios aparecerán en tu proyecto. Para explorar, el agente usa `read`, `grep` y `glob`, que no piden permiso; solo te preguntará antes de escribir, editar o ejecutar comandos.
 
-**6. Separa las máquinas.** Instala Tailscale en ambas, cambia `listen.host` a la IP de Tailscale de la remota y `RELAY_URL` a `ws://<esa-ip>:7443/acp`. En la máquina local solo necesitas el CLI y ripgrep (pasos 1, 4 y 5); en la remota no hace falta ripgrep.
+**6. Separa las máquinas.** Instala Tailscale en ambas, cambia `listen.host` a la IP de Tailscale de la remota y `RELAY_URL` a `ws://<esa-ip>:7443/acp`. En la máquina local haz los pasos 1 (clonar, compilar y `npm link`), 4 (ripgrep) y 5; no necesitas proveedores ni el daemon. En la remota no hace falta ripgrep. Para no exportar variables cada vez, usa `cli.yaml` (ver [CLI](#2-cli-tu-máquina)).
 
 ## Instalación
 
@@ -132,12 +132,27 @@ Al iniciar, el daemon muestra su versión, la dirección en la que escucha, el n
 
 ### 2. CLI (tu máquina)
 
+El comando `relay` se instala con `npm link`, así que en tu máquina también hay que clonar y compilar:
+
+```bash
+git clone https://github.com/invincibleOf/agent-relay && cd agent-relay
+npm install && npm run build && npm link
+which relay            # debe mostrar una ruta; si no, revisa que el bin de npm esté en tu PATH
+```
+
+Luego crea la configuración con los hosts a los que te conectas:
+
 ```bash
 mkdir -p ~/.config/agent-relay
 cp examples/cli.yaml ~/.config/agent-relay/cli.yaml
-export RELAY_TOKEN_CASA='relay_…'
+# Edita hosts.casa.url con la dirección del daemon, p. ej. ws://100.x.y.z:7443/acp (IP de Tailscale)
+```
 
-relay doctor           # verifica conexión, agente y workspace espejo
+El host `casa` del ejemplo lee el token de la variable `RELAY_TOKEN_CASA` (`tokenEnv`). `export` solo vale en la terminal actual; para no repetirlo, agrégalo a `~/.zshrc` o usa `tokenFile` en `cli.yaml`.
+
+```bash
+export RELAY_TOKEN_CASA='relay_…'
+relay doctor           # usa defaultHost (casa); otro host: relay doctor -H aws
 ```
 
 Para una prueba rápida sin archivo de configuración:

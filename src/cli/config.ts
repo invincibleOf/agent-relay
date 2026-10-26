@@ -80,13 +80,21 @@ export function resolveHost(cfg: CliConfig, hostName?: string, urlOverride?: str
     throw new Error(`No hay hosts configurados. Crea ${defaultCliConfigPath()} (ver examples/cli.yaml) o usa RELAY_URL + RELAY_TOKEN.`);
   }
   const host = cfg.hosts[name];
-  if (!host) throw new Error(`Host "${name}" no existe. Disponibles: ${Object.keys(cfg.hosts).join(", ") || "ninguno"}`);
+  if (!host) throw new Error(`Host "${name}" no existe en ${defaultCliConfigPath()}. Disponibles: ${Object.keys(cfg.hosts).join(", ") || "ninguno"}`);
 
   const token =
     host.token ??
     (host.tokenEnv ? process.env[host.tokenEnv] : undefined) ??
     (host.tokenFile ? readFileSync(host.tokenFile, "utf8").trim() : undefined);
-  if (!token) throw new Error(`El host "${name}" no tiene token (token, tokenEnv o tokenFile)`);
+  if (!token) {
+    if (host.tokenEnv) {
+      throw new Error(
+        `El host "${name}" lee el token de la variable ${host.tokenEnv}, que no está definida en esta terminal. ` +
+          `Ejecuta: export ${host.tokenEnv}='relay_…' (o agrégalo a tu ~/.zshrc / ~/.bashrc).`,
+      );
+    }
+    throw new Error(`El host "${name}" no tiene token: define token, tokenEnv o tokenFile en ${defaultCliConfigPath()}`);
+  }
 
   return {
     name,
