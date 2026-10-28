@@ -13,7 +13,7 @@ CLI local (`relay`) y daemon remoto (`relay-daemon`) en TypeScript que conectan 
 
 - `src/shared/` — protocolo de control (`relay/hello`, `relay/ready`), traducción de rutas y utilidades de terminal (`ui.ts`).
 - `src/daemon/` — servidor WebSocket, auth, workspace espejo, puente con el adaptador ACP y puente de herramientas MCP (`tool-bridge.ts`, `presets.ts`).
-- `src/cli/` — REPL, cliente ACP, herramientas locales (fs/terminal), comandos, renderizado (`render.ts`, `markdown.ts`).
+- `src/cli/` — REPL, cliente ACP, herramientas locales (fs/terminal), comandos, editor de entrada (`input.ts`), renderizado (`render.ts`, `markdown.ts`).
 - `examples/` — configuraciones de ejemplo y un comando personalizado.
 
 ## Convenciones

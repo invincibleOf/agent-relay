@@ -347,7 +347,18 @@ Comandos dentro de la sesión:
 | `/clear` | Limpia la pantalla |
 | `/exit` | Salir |
 | `@ruta/archivo` | Adjunta un archivo local como referencia |
-| `Ctrl+C` | Cancela el turno (dos veces seguidas para salir) |
+| `Ctrl+C` | Cancela el turno, o borra lo escrito (dos veces seguidas para salir) |
+
+**Escribir y pegar varias líneas.** Puedes pegar texto de varias líneas (código, logs, un error completo) y se envía como un solo mensaje; si es largo, se muestra resumido como `[texto pegado #1 · 40 líneas · 1200 caracteres]` y al agente le llega completo. Para escribir un salto de línea a mano:
+
+| Atajo | Funciona en |
+|---|---|
+| `\` + Enter | Todas las terminales |
+| Option + Enter (macOS) / Alt + Enter | Terminal.app con *"Usar Option como tecla Meta"*, iTerm2, Windows Terminal |
+| Shift + Enter | iTerm2, WezTerm, kitty, Ghostty y Windows Terminal recientes |
+| Ctrl + J | Todas las terminales |
+
+Otros atajos del campo de texto: `↑`/`↓` historial (se guarda en `~/.config/agent-relay/history.json`) o moverse entre líneas, `Tab` completa `/comandos`, `Ctrl+A`/`Ctrl+E` inicio y fin de línea, `Ctrl+W` borra una palabra, `Ctrl+U` borra hasta el inicio, `Ctrl+L` limpia la pantalla y `Ctrl+D` sale con el campo vacío.
 
 Mientras el agente trabaja, cada operación sobre tu máquina aparece como una línea `⌂` (`lee`, `escribe`, `edita`, `busca`, `lista`, `ejecuta`), y cada turno termina con su duración y el número de herramientas usadas. Las respuestas se muestran con formato Markdown. Con `NO_COLOR=1`, o si la salida no es una terminal (por ejemplo `relay -p … > respuesta.md`), el texto sale sin colores ni formato; en modo `-p` el encabezado va a stderr para que stdout quede solo con la respuesta.
 
@@ -419,6 +430,7 @@ src/
 │   └── auth.ts, config.ts
 └── cli/
     ├── main.ts            # REPL, comandos, permisos, banner y doctor
+    ├── input.ts           # editor de entrada: pegado multilínea, historial, atajos
     ├── transport.ts       # conexión con el daemon → Stream ACP
     ├── local-tools.ts     # fs y terminales en tu máquina
     ├── project.ts         # raíz del proyecto y archivos en formato abierto
@@ -435,6 +447,7 @@ test/
 ├── fake-agent.ts          # agente ACP de prueba
 ├── e2e.test.ts            # daemon + CLI + agente falso de punta a punta
 ├── unit.test.ts
+├── input.test.ts          # editor de entrada con una terminal simulada
 └── markdown.test.ts       # renderizado Markdown en streaming
 ```
 

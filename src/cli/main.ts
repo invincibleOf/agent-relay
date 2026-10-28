@@ -20,7 +20,8 @@ import type { ProjectFile, ReadyFrame } from "../shared/protocol.js";
 import { box, rows, termWidth, tildify, truncate, truncateStart, visibleWidth } from "../shared/ui.js";
 import { packageVersion } from "../shared/version.js";
 import { INIT_PROMPT, expandTemplate, loadCustomCommands } from "./commands.js";
-import { defaultCliConfigPath, loadCliConfig, resolveHost, type ResolvedHost } from "./config.js";
+import { configDir, defaultCliConfigPath, loadCliConfig, resolveHost, type ResolvedHost } from "./config.js";
+import { InputEditor } from "./input.js";
 import { LocalTools } from "./local-tools.js";
 import { collectProjectFiles, findProjectRoot, projectId } from "./project.js";
 import { Renderer, st } from "./render.js";
@@ -107,11 +108,17 @@ async function main() {
   const relay = await connectRelay({ host, provider: values.agent, project: { root, id: projectId(root), files } });
   if (interactive) process.stdout.write("\x1b[2K");
 
-  let rl: Interface | undefined;
-  const ask = async (q: string) => {
-    if (!rl) throw new Error("sin terminal interactiva");
-    return rl.question(q);
+  // En una terminal se usa el editor propio (pegado de varias líneas, historial);
+  // si la entrada viene de una tubería, readline línea por línea.
+  const tty = Boolean(process.stdin.isTTY && process.stdout.isTTY);
+  const editor = interactive && tty ? new InputEditor(process.stdin, process.stdout, st, path.join(configDir(), "history.json")) : undefined;
+  let fallback: Interface | undefined;
+  const readInput = async (prompt: string, multiline: boolean, history: boolean): Promise<string> => {
+    if (editor) return editor.read({ prompt, multiline, history });
+    fallback ??= createInterface({ input: process.stdin, output: process.stdout, terminal: false });
+    return fallback.question(prompt);
   };
+  const ask = (q: string) => readInput(q, false, false);
 
   const app = client({ name: "agent-relay" })
     .onRequest(methods.client.fs.readTextFile, ({ params }) => tools.readTextFile(params))
@@ -163,32 +170,43 @@ async function main() {
 
   printBanner(ctx, session, warnings);
 
-  rl = createInterface({ input: process.stdin, output: process.stdout, terminal: process.stdin.isTTY });
   let turnActive = false;
   let lastSigint = 0;
-  rl.on("SIGINT", () => {
+  const onInterrupt = () => {
     if (turnActive) {
       renderer.line(st.yellow("  cancelando…"));
       void acp.agent.notify(methods.agent.session.cancel, { sessionId: session.id });
       return;
     }
     if (Date.now() - lastSigint < 1500) {
-      rl?.close();
+      editor?.stop();
       relay.close();
       process.exit(0);
     }
     lastSigint = Date.now();
     renderer.line(st.gray("  (Ctrl+C otra vez para salir)"));
-  });
+  };
+  if (editor) {
+    editor.start();
+    editor.onInterrupt(onInterrupt); // Ctrl+C mientras el agente trabaja
+  } else {
+    process.on("SIGINT", onInterrupt);
+  }
 
   const commands = () => loadCustomCommands(root);
+  editor?.setCompletions(() => [
+    ...BUILTIN_COMMANDS.map(([c]) => c.split(" ")[0]),
+    ...[...commands().keys()].map((c) => `/${c}`),
+    ...renderer.availableCommands.map((c) => `/${c.name}`),
+  ]);
 
   for (;;) {
     let input: string;
     try {
-      input = (await rl.question(`\n${st.accent("›")} `)).trim();
+      process.stdout.write("\n");
+      input = (await readInput(`${st.accent("›")} `, true, true)).trim();
     } catch {
-      break; // stdin cerrado
+      break; // Ctrl+D, Ctrl+C dos veces o stdin cerrado
     }
     if (!input) continue;
 
@@ -199,7 +217,8 @@ async function main() {
       switch (cmd) {
         case "exit":
         case "quit":
-          rl.close();
+          editor?.stop();
+          fallback?.close();
           relay.close();
           return;
         case "help":
@@ -266,6 +285,8 @@ async function main() {
     }
   }
 
+  editor?.stop();
+  fallback?.close();
   relay.close();
 }
 
@@ -317,7 +338,7 @@ function printBanner(ctx: Context, session: { id: string; modes: SessionModeStat
   for (const w of warnings) process.stdout.write(`  ${st.yellow("!")} ${st.yellow(w)}\n`);
 
   process.stdout.write(
-    `\n  ${st.gray("/help")} ${st.gray("comandos")}  ${st.gray("·")}  ${st.gray("@archivo")} ${st.gray("adjunta")}  ${st.gray("·")}  ${st.gray("Ctrl+C")} ${st.gray("cancela")}  ${st.gray("·")}  ${st.gray("/exit")} ${st.gray("sale")}\n`,
+    `\n  ${st.gray("/help comandos  ·  @archivo adjunta  ·  \\ + Enter nueva línea  ·  Ctrl+C cancela  ·  /exit sale")}\n`,
   );
 }
 
@@ -328,7 +349,12 @@ function printHelp(renderer: Renderer, customCount: number) {
   for (const l of rows(
     [
       ["@ruta/archivo", "Adjunta un archivo local como referencia"],
-      ["Ctrl+C", "Cancela el turno en curso (dos veces para salir)"],
+      ["\\ + Enter", "Nueva línea (también Option/Alt+Enter, Shift+Enter o Ctrl+J según la terminal)"],
+      ["pegar", "Pega texto de varias líneas; si es largo se muestra resumido"],
+      ["↑ / ↓", "Historial de mensajes (o moverse entre líneas)"],
+      ["Tab", "Completa /comandos"],
+      ["Ctrl+C", "Cancela el turno o borra el texto (dos veces para salir)"],
+      ["Ctrl+D", "Sale si el campo está vacío"],
     ],
     st,
   )) {
@@ -575,7 +601,12 @@ async function requestPermission(
     `    ${req.options.map((o, i) => `${st.accent(`[${i + 1}]`)} ${PERMISSION_LABEL[o.kind] ?? o.name}`).join("   ")}`,
   );
   for (;;) {
-    const answer = (await ctx.ask(`    ${st.accent("›")} `)).trim().toLowerCase();
+    let answer: string;
+    try {
+      answer = (await ctx.ask(`    ${st.accent("›")} `)).trim().toLowerCase();
+    } catch {
+      return denied(); // Ctrl+C / Ctrl+D en la pregunta
+    }
     const idx = Number(answer) - 1;
     if (Number.isInteger(idx) && req.options[idx]) return { outcome: { outcome: "selected", optionId: req.options[idx].optionId } };
     if (answer === "s" || answer === "si" || answer === "sí" || answer === "y") {
