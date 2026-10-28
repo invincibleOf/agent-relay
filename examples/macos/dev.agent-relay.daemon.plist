@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Mantiene relay-daemon corriendo en macOS (se inicia al entrar a tu sesión y se reinicia si falla).
+
+  1. Reemplaza TU_USUARIO por tu usuario (whoami) y ajusta la ruta de relay-daemon (which relay-daemon).
+  2. cp examples/macos/dev.agent-relay.daemon.plist ~/Library/LaunchAgents/
+  3. launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.agent-relay.daemon.plist
+  Detener: launchctl bootout gui/$(id -u)/dev.agent-relay.daemon
+  Logs:    tail -f ~/Library/Logs/agent-relay.log
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.agent-relay.daemon</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/relay-daemon</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!-- launchd no carga tu shell: node, npx y los CLIs de los proveedores deben estar en este PATH. -->
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>NO_COLOR</key>
+    <string>1</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardErrorPath</key>
+  <string>/Users/TU_USUARIO/Library/Logs/agent-relay.log</string>
+  <key>StandardOutPath</key>
+  <string>/Users/TU_USUARIO/Library/Logs/agent-relay.log</string>
+</dict>
+</plist>

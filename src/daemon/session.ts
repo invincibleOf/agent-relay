@@ -68,8 +68,12 @@ export function bridgeSession(opts: BridgeOptions): ChildProcessWithoutNullStrea
 
   const baseEnv = { ...process.env, ...provider.env };
   const presetEnv = provider.toolBridge.enabled ? presetSpawnEnv(provider.toolBridge.preset, remoteRoot, baseEnv) : {};
-  const child = spawn(provider.command, provider.args, {
+  // En Windows, npx, opencode y los bins de npm son scripts .cmd que solo arrancan a
+  // través de un shell; se arma la línea de comando con comillas explícitas.
+  const windows = process.platform === "win32";
+  const child = spawn(windows ? windowsCommandLine(provider.command, provider.args) : provider.command, windows ? [] : provider.args, {
     cwd: remoteRoot,
+    shell: windows,
     env: { ...baseEnv, ...presetEnv },
     stdio: ["pipe", "pipe", "pipe"],
   });
@@ -232,6 +236,12 @@ export function bridgeSession(opts: BridgeOptions): ChildProcessWithoutNullStrea
   });
 
   return child;
+}
+
+/** Línea de comando para cmd.exe con comillas en los argumentos que las necesitan. */
+export function windowsCommandLine(command: string, args: string[]): string {
+  const quote = (a: string) => (a === "" || /[\s"&|<>^()]/.test(a) ? `"${a.replace(/"/g, '""')}"` : a);
+  return [command, ...args].map(quote).join(" ");
 }
 
 /** Registra en el log qué operaciones delega el agente al cliente por ACP. */

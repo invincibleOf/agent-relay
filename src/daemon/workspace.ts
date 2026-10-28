@@ -63,7 +63,9 @@ export function materializeWorkspace(
     removeIfExists(link);
     if (!hasSkills) continue;
     mkdirSync(path.dirname(link), { recursive: true });
-    symlinkSync(path.relative(path.dirname(link), skillsTarget), link, "dir");
+    // En Windows una junction no requiere permisos de administrador (necesita ruta absoluta).
+    if (process.platform === "win32") symlinkSync(skillsTarget, link, "junction");
+    else symlinkSync(path.relative(path.dirname(link), skillsTarget), link, "dir");
     written.add(path.relative(root, link));
   }
 

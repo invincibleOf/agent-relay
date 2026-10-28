@@ -7,6 +7,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { deepMerge, presetSessionMeta, presetSpawnEnv } from "../src/daemon/presets.ts";
 import { detectPreset } from "../src/daemon/config.ts";
+import { buildGlobCommand, buildGrepCommand } from "../src/daemon/tool-bridge.ts";
+import { windowsCommandLine } from "../src/daemon/session.ts";
 import { safeRelativePath } from "../src/daemon/workspace.ts";
 import { rewritePathPrefix } from "../src/shared/protocol.ts";
 
@@ -91,4 +93,39 @@ test("displayCommand muestra el comando sin el envoltorio del shell", () => {
 
 test("expandTemplate sustituye $ARGUMENTS y posicionales", () => {
   assert.equal(expandTemplate("Revisa $1 con foco en $2. Todo: $ARGUMENTS", "src/a.ts seguridad"), "Revisa src/a.ts con foco en seguridad. Todo: src/a.ts seguridad");
+});
+
+test("grep y glob del puente generan comandos POSIX y PowerShell", () => {
+  const posix = buildGrepCommand({ pattern: "it's", path: "/p", glob: "*.ts", max: 10 }, false);
+  assert.match(posix, /^if command -v rg/);
+  assert.ok(posix.includes(`-e 'it'\\''s' -- '/p'`));
+  assert.ok(posix.endsWith("| head -n 10"));
+
+  const ps = buildGrepCommand({ pattern: "it's", path: "C:\\p", glob: "*.java", ignoreCase: true, max: 5 }, true);
+  assert.match(ps, /^& \{ if \(Get-Command rg/);
+  assert.ok(ps.includes(`-e 'it''s' 'C:\\p'`), "comillas de PowerShell y sin --");
+  assert.ok(!ps.includes(" -- "));
+  assert.ok(ps.includes("Select-String -Pattern 'it''s'") && !ps.includes("-CaseSensitive"));
+  assert.ok(ps.endsWith("Select-Object -First 5"));
+  assert.ok(!ps.includes('"'), "sin comillas dobles: evita problemas de escape en Windows");
+  assert.ok(buildGrepCommand({ pattern: "x", path: "C:\\p", max: 1 }, true).includes("-CaseSensitive"));
+
+  const files = buildGrepCommand({ pattern: "x", path: "C:\\p", filesOnly: true, max: 1 }, true);
+  assert.ok(files.includes("rg -l") && files.includes("-List") && files.includes("$_.Path }"));
+
+  const gps = buildGlobCommand({ pattern: "src/**/*.java", path: "C:\\p", max: 7 }, true);
+  assert.ok(gps.includes("-g 'src/**/*.java' 'C:\\p'") && gps.includes("-Filter '*.java'") && gps.endsWith("-First 7"));
+  assert.match(buildGlobCommand({ pattern: "**/*.ts", path: "/p", max: 3 }, false), /find '\/p' -type f -name '\*\.ts'/);
+});
+
+test("displayCommand reconoce PowerShell", () => {
+  assert.equal(displayCommand("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", "Get-ChildItem"]), "Get-ChildItem");
+});
+
+test("windowsCommandLine pone comillas solo donde hace falta", () => {
+  assert.equal(windowsCommandLine("npx", ["-y", "@zed-industries/codex-acp"]), "npx -y @zed-industries/codex-acp");
+  assert.equal(
+    windowsCommandLine("C:\\Program Files\\nodejs\\npx.cmd", ["-y", "a b", 'x"y']),
+    '"C:\\Program Files\\nodejs\\npx.cmd" -y "a b" "x""y"',
+  );
 });

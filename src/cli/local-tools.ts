@@ -30,7 +30,7 @@ interface Terminal {
 
 /** Muestra el comando real cuando viene envuelto en un shell (`sh -c …`, `cmd /c …`). */
 export function displayCommand(command: string, args: string[]): string {
-  const shells = /(^|[\\/])(sh|bash|zsh|cmd(\.exe)?)$/i;
+  const shells = /(^|[\\/])(sh|bash|zsh|cmd(\.exe)?|powershell(\.exe)?|pwsh(\.exe)?)$/i;
   const last = args.at(-1);
   const wrapped = shells.test(command) && last !== undefined && args.slice(0, -1).every((a) => /^[-/]/.test(a));
   const text = wrapped ? last : [command, ...args].join(" ");

@@ -130,7 +130,9 @@ export function resolveHost(cfg: LoadedCliConfig, hostName?: string, urlOverride
     if (host.tokenEnv) {
       throw new Error(
         `El host "${name}" lee el token de la variable ${host.tokenEnv}, que no está definida en esta terminal. ` +
-          `Ejecuta: export ${host.tokenEnv}='relay_…' (o agrégalo a tu ~/.zshrc / ~/.bashrc).`,
+          (process.platform === "win32"
+            ? `En PowerShell: $env:${host.tokenEnv}='relay_…' (o, para que persista: setx ${host.tokenEnv} "relay_…" y abre una terminal nueva).`
+            : `Ejecuta: export ${host.tokenEnv}='relay_…' (o agrégalo a tu ~/.zshrc / ~/.bashrc).`),
       );
     }
     throw new Error(`El host "${name}" no tiene token: define token, tokenEnv o tokenFile en ${cfg.source.path}`);

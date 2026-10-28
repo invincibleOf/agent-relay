@@ -1,6 +1,6 @@
 {
   "name": "agent-relay",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "CLI local que usa agentes de código (Claude Code, Codex, OpenCode) ejecutándose en una máquina remota, mientras los archivos y comandos se ejecutan en tu máquina. Todo el consumo de IA ocurre en el daemon remoto.",
   "type": "module",
   "license": "MIT",

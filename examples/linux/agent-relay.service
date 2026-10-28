@@ -1,0 +1,24 @@
+# Servicio de usuario de systemd para relay-daemon (Linux, p. ej. una instancia de AWS).
+#
+#   mkdir -p ~/.config/systemd/user
+#   cp examples/linux/agent-relay.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now agent-relay
+#   loginctl enable-linger "$USER"     # que siga corriendo sin sesión abierta
+#   journalctl --user -u agent-relay -f
+#
+# Ajusta ExecStart con la salida de `which relay-daemon` y Environment=PATH si usas nvm.
+[Unit]
+Description=agent-relay daemon
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/relay-daemon
+Environment=NO_COLOR=1
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

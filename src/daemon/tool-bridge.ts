@@ -136,7 +136,11 @@ function truncate(text: string): string {
 export function buildMcpServer(t: BridgeTarget): McpServer {
   const server = new McpServer(
     { name: BRIDGE_SERVER_NAME, version: packageVersion() },
-    { instructions: BRIDGE_INSTRUCTIONS },
+    {
+      instructions: t.localSep === "\\"
+        ? `${BRIDGE_INSTRUCTIONS}\nThe user's machine runs Windows: bash runs Windows PowerShell, so write PowerShell commands, and file paths on that machine use backslashes.`
+        : BRIDGE_INSTRUCTIONS,
+    },
   );
   const io = new BridgeIO(t);
 
@@ -234,7 +238,7 @@ export function buildMcpServer(t: BridgeTarget): McpServer {
     "bash",
     {
       description:
-        "Run a program on the user's machine, in the project root (POSIX sh, or cmd.exe on Windows): builds, tests, linters, package managers, git. Requires the user's approval. Do not use it to read, list or search files (use read, glob, grep) or to modify files (use edit, write). Returns combined stdout/stderr and the exit code.",
+        `Run a program on the user's machine, in the project root, with ${io.windows ? "Windows PowerShell (use PowerShell syntax, not bash)" : "POSIX sh"}: builds, tests, linters, package managers, git. Requires the user's approval. Do not use it to read, list or search files (use read, glob, grep) or to modify files (use edit, write). Returns combined stdout/stderr and the exit code.`,
       inputSchema: {
         command: z.string().min(1),
         timeout_ms: z.number().int().positive().max(MAX_BASH_TIMEOUT_MS).optional(),
@@ -265,13 +269,10 @@ export function buildMcpServer(t: BridgeTarget): McpServer {
       annotations: { readOnlyHint: true },
     },
     guarded("grep", async ({ pattern, path: p, glob, ignore_case, files_only, max_results }) => {
-      io.requirePosix("grep");
-      const target = q(io.toLocal(p ?? "."));
-      const i = ignore_case ? "-i" : "";
-      const l = files_only ? "-l" : "-n";
-      const rg = `rg ${l} --no-heading --color never ${i} ${glob ? `-g ${q(glob)}` : ""} -e ${q(pattern)} -- ${target}`;
-      const gr = `grep -rE ${l} ${i} ${glob ? `--include=${q(glob)}` : ""} --exclude-dir=.git --exclude-dir=node_modules -e ${q(pattern)} -- ${target}`;
-      const cmd = `if command -v rg >/dev/null 2>&1; then ${rg}; else ${gr}; fi | head -n ${max_results ?? 500}`;
+      const cmd = buildGrepCommand(
+        { pattern, path: io.toLocal(p ?? "."), glob, ignoreCase: ignore_case, filesOnly: files_only, max: max_results ?? 500 },
+        io.windows,
+      );
       const where = p ? ` en ${p}` : "";
       const r = await io.shell(cmd, DEFAULT_BASH_TIMEOUT_MS, { kind: "search", detail: `'${pattern}'${where}${glob ? ` (${glob})` : ""}` });
       return ok(io.toRemoteText(r.output).trim() || "Sin coincidencias");
@@ -291,12 +292,7 @@ export function buildMcpServer(t: BridgeTarget): McpServer {
       annotations: { readOnlyHint: true },
     },
     guarded("glob", async ({ pattern, path: p, max_results }) => {
-      io.requirePosix("glob");
-      const target = q(io.toLocal(p ?? "."));
-      const base = pattern.split("/").pop() ?? pattern;
-      const rg = `rg --files --color never -g ${q(pattern)} -- ${target}`;
-      const fd = `find ${target} -type f -name ${q(base)} -not -path '*/.git/*' -not -path '*/node_modules/*'`;
-      const cmd = `if command -v rg >/dev/null 2>&1; then ${rg}; else ${fd}; fi | head -n ${max_results ?? 1000}`;
+      const cmd = buildGlobCommand({ pattern, path: io.toLocal(p ?? "."), max: max_results ?? 1000 }, io.windows);
       const r = await io.shell(cmd, DEFAULT_BASH_TIMEOUT_MS, { kind: "list", detail: `${pattern}${p ? ` en ${p}` : ""}` });
       return ok(io.toRemoteText(r.output).trim() || "Sin archivos");
     }),
@@ -320,16 +316,71 @@ function q(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
+/** Comillas simples de PowerShell (la comilla se escapa duplicándola). */
+function psq(s: string): string {
+  return `'${s.replace(/'/g, "''")}'`;
+}
+
+const PS_EXCLUDED = `Where-Object { $_.FullName -notmatch '[\\\\/](\\.git|node_modules)[\\\\/]' }`;
+
+export interface GrepOptions {
+  pattern: string;
+  path: string;
+  glob?: string;
+  ignoreCase?: boolean;
+  filesOnly?: boolean;
+  max: number;
+}
+
+/** grep del puente: ripgrep si existe; si no, grep (POSIX) o Select-String (PowerShell). */
+export function buildGrepCommand(o: GrepOptions, windows: boolean): string {
+  if (!windows) {
+    const target = q(o.path);
+    const i = o.ignoreCase ? "-i" : "";
+    const l = o.filesOnly ? "-l" : "-n";
+    const rg = `rg ${l} --no-heading --color never ${i} ${o.glob ? `-g ${q(o.glob)}` : ""} -e ${q(o.pattern)} -- ${target}`;
+    const gr = `grep -rE ${l} ${i} ${o.glob ? `--include=${q(o.glob)}` : ""} --exclude-dir=.git --exclude-dir=node_modules -e ${q(o.pattern)} -- ${target}`;
+    return `if command -v rg >/dev/null 2>&1; then ${rg}; else ${gr}; fi | head -n ${o.max}`;
+  }
+  const rgArgs = [o.filesOnly ? "-l" : "-n", "--no-heading", "--color", "never"];
+  if (o.ignoreCase) rgArgs.push("-i");
+  if (o.glob) rgArgs.push("-g", psq(o.glob));
+  // Windows PowerShell 5.1 descarta "--" al invocar ejecutables nativos; las rutas absolutas
+  // de Windows nunca empiezan con "-", así que no hace falta.
+  const rg = `rg ${rgArgs.join(" ")} -e ${psq(o.pattern)} ${psq(o.path)}`;
+  const files = `Get-ChildItem -Path ${psq(o.path)} -Recurse -File${o.glob ? ` -Include ${psq(o.glob)}` : ""} -ErrorAction SilentlyContinue | ${PS_EXCLUDED}`;
+  const select = `Select-String -Pattern ${psq(o.pattern)}${o.ignoreCase ? "" : " -CaseSensitive"}${o.filesOnly ? " -List" : ""}`;
+  const format = o.filesOnly ? "ForEach-Object { $_.Path }" : "ForEach-Object { '{0}:{1}:{2}' -f $_.Path, $_.LineNumber, $_.Line }";
+  return `& { if (Get-Command rg -ErrorAction SilentlyContinue) { ${rg} } else { ${files} | ${select} | ${format} } } | Select-Object -First ${o.max}`;
+}
+
+export interface GlobOptions {
+  pattern: string;
+  path: string;
+  max: number;
+}
+
+/** glob del puente: ripgrep si existe; si no, find (POSIX) o Get-ChildItem (PowerShell). */
+export function buildGlobCommand(o: GlobOptions, windows: boolean): string {
+  const base = o.pattern.split("/").pop() ?? o.pattern;
+  if (!windows) {
+    const target = q(o.path);
+    const rg = `rg --files --color never -g ${q(o.pattern)} -- ${target}`;
+    const fd = `find ${target} -type f -name ${q(base)} -not -path '*/.git/*' -not -path '*/node_modules/*'`;
+    return `if command -v rg >/dev/null 2>&1; then ${rg}; else ${fd}; fi | head -n ${o.max}`;
+  }
+  const rg = `rg --files --color never -g ${psq(o.pattern)} ${psq(o.path)}`;
+  const gci = `Get-ChildItem -Path ${psq(o.path)} -Recurse -File -Filter ${psq(base)} -ErrorAction SilentlyContinue | ${PS_EXCLUDED} | ForEach-Object { $_.FullName }`;
+  return `& { if (Get-Command rg -ErrorAction SilentlyContinue) { ${rg} } else { ${gci} } } | Select-Object -First ${o.max}`;
+}
+
 class BridgeIO {
   constructor(private t: BridgeTarget) {}
 
-  private get windows() {
+  get windows() {
     return this.t.localSep === "\\";
   }
 
-  requirePosix(tool: string) {
-    if (this.windows) throw new Error(`${tool} aún no está disponible con un cliente Windows; usa bash con findstr o dir`);
-  }
 
   /** Ruta que da el agente (espejo remoto o relativa) → ruta en la máquina local. */
   toLocal(p: string): string {
@@ -355,7 +406,9 @@ class BridgeIO {
   /** `display` le dice al CLI cómo mostrar la operación (ver RelayDisplayMeta). */
   async shell(command: string, timeoutMs: number, display?: { kind: string; detail: string }) {
     const sessionId = await this.t.sessionId;
-    const [cmd, args] = this.windows ? ["cmd.exe", ["/d", "/s", "/c", command]] : ["/bin/sh", ["-c", command]];
+    const [cmd, args] = this.windows
+      ? ["powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", command]]
+      : ["/bin/sh", ["-c", command]];
     this.t.log(`puente → terminal ${command.length > 120 ? `${command.slice(0, 120)}…` : command}`);
 
     const { terminalId } = await this.t.requester.request<{ terminalId: string }>("terminal/create", {
