@@ -1,6 +1,9 @@
 import type { AvailableCommand, SessionConfigOption, SessionNotification, ToolCallContent } from "@agentclientprotocol/sdk";
 import { isTTY, makeStyles, tildify, truncate, termWidth } from "../shared/ui.js";
-import { MarkdownStream } from "./markdown.js";
+import { MarkdownStream, inline } from "./markdown.js";
+
+/** Quita marcadores de Markdown (para texto que se muestra atenuado). */
+const stripMarkers = (s: string) => s.replace(/\*\*|__|`/g, "");
 
 export const st = makeStyles(isTTY());
 /** Alias histórico usado en el resto del CLI. */
@@ -137,7 +140,7 @@ export class Renderer {
         for (const e of u.entries) {
           const mark =
             e.status === "completed" ? st.green("✓") : e.status === "in_progress" ? st.accent("▸") : st.gray("○");
-          const text = e.status === "completed" ? st.gray(e.content) : e.content;
+          const text = e.status === "completed" ? st.gray(stripMarkers(e.content)) : inline(e.content, st);
           this.line(`    ${mark} ${text}`);
         }
         break;

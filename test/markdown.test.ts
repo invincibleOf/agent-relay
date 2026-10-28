@@ -52,3 +52,70 @@ test("emite texto antes de que termine la línea", () => {
 test("inline formatea enlaces", () => {
   assert.equal(stripAnsi(inline("ver [docs](https://x.dev)", on)), "ver docs (https://x.dev)");
 });
+
+// Casos reales que dejaban marcadores sin formatear.
+const LEFTOVER = /\*\*|(^|\s)\*\S|(^|\s)__\w|\[[^\]]+\]\(/;
+
+test("la negrita puede contener código", () => {
+  for (const text of ["**El archivo `pom.xml`** define todo.", "- **`GET /api/tareas`**: lista.", "1. **`LiveClientService`**: consulta."]) {
+    const out = stripAnsi(render([text, "\n"]));
+    assert.doesNotMatch(out, LEFTOVER, out);
+    assert.ok(render([text, "\n"]).includes(on.cyan(text.match(/`([^`]+)`/)![1])));
+  }
+});
+
+test("los * y _ dentro del código no se interpretan", () => {
+  const out = render(["Usa `a*b*c` y `snake_case_x`, pero **sí** esto.\n"]);
+  assert.equal(stripAnsi(out), "Usa a*b*c y snake_case_x, pero sí esto.\n");
+});
+
+test("soporta __negrita__ y _cursiva_ sin tocar snake_case", () => {
+  const out = stripAnsi(render(["__negrita__ y _cursiva_ pero snake_case_name y MAX_TOKENS quedan igual.\n"]));
+  assert.equal(out, "negrita y cursiva pero snake_case_name y MAX_TOKENS quedan igual.\n");
+});
+
+test("un * suelto no rompe la negrita", () => {
+  assert.equal(stripAnsi(render(["**Nota:** calcula **x * y** primero.\n"])), "Nota: calcula x * y primero.\n");
+});
+
+test("los enlaces no se confunden con los códigos de color", () => {
+  const out = stripAnsi(render(["Usa *SSE* (ver [la guía](https://x.dev/sse)).\n"]));
+  assert.equal(out, "Usa SSE (ver la guía (https://x.dev/sse)).\n");
+});
+
+test("los encabezados con negrita interna quedan en negrita completa", () => {
+  const out = render(["## Resumen de **coach-lol**\n"]);
+  assert.equal(stripAnsi(out), "Resumen de coach-lol\n");
+  // Un solo cierre de negrita, al final: los ** internos no la apagan a mitad de línea.
+  assert.equal(out.split("\x1b[22m").length - 1, 1);
+});
+
+test("el resultado visible no depende de la fragmentación del streaming", () => {
+  const doc = [
+    "## Resumen de **coach-lol**",
+    "",
+    "**Coach LoL** es una app **Spring Boot 3.4** que da consejos.",
+    "1. **`LiveClientService`**: consulta `/allgamedata` cada *5 s*.",
+    "- **Throttle:** máximo una llamada cada **45 s**; ver `MIN_INTERVAL_MS`.",
+    "- Usa *SSE* y no WebSocket (ver [la guía](https://docs.spring.io/sse)).",
+    "> **Importante:** cada llamada se *factura*.",
+    "| **Archivo** | Uso |",
+    "Variables como snake_case_name no cambian. Fin con **negrita**.",
+    "",
+  ].join("\n");
+  const visible = (s: string) => s.replace(/\x1b\[(\d+(;\d+)*)m/g, (_, c: string) => `<${c}>`);
+  const expected = stripAnsi(render([doc]));
+  assert.doesNotMatch(expected, LEFTOVER);
+  // Fragmentaciones deterministas: de 1 a 13 caracteres, y alternadas.
+  for (let size = 1; size <= 13; size++) {
+    const chunks: string[] = [];
+    for (let i = 0, k = 0; i < doc.length; k++) {
+      const n = size + (k % 3);
+      chunks.push(doc.slice(i, i + n));
+      i += n;
+    }
+    const out = render(chunks);
+    assert.equal(stripAnsi(out), expected, `tamaño ${size}`);
+    assert.doesNotMatch(visible(out), /\*\*/);
+  }
+});
