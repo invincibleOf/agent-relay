@@ -331,6 +331,9 @@ relay -H aws                       # elige host de cli.yaml
 relay -p "explica src/main.ts"     # un solo prompt y salir
 relay -y                           # aprueba permisos automáticamente (con cuidado)
 relay doctor                       # verifica conexión, agente, puente y ripgrep
+relay -C                           # continúa la última sesión de este proyecto
+relay --resume                     # elige una sesión anterior de una lista
+relay sessions                     # lista las sesiones de este proyecto
 ```
 
 Comandos dentro de la sesión:
@@ -339,6 +342,8 @@ Comandos dentro de la sesión:
 |---|---|
 | `/help` | Ayuda |
 | `/new` | Nueva sesión con el agente |
+| `/resume [n\|id]` | Lista las sesiones del proyecto y reanuda una |
+| `/reconnect` | Reconecta con el daemon si se agotaron los reintentos automáticos |
 | `/init` | Crea o mejora `AGENTS.md` (sin crear archivos de proveedor) |
 | `/model [id]` | Muestra o cambia el modelo (si el agente lo permite) |
 | `/mode [id]` | Muestra o cambia el modo del agente |
@@ -363,6 +368,36 @@ Otros atajos del campo de texto: `↑`/`↓` historial (se guarda en `~/.config/
 Mientras el agente trabaja, cada operación sobre tu máquina aparece como una línea `⌂` (`lee`, `escribe`, `edita`, `busca`, `lista`, `ejecuta`), y cada turno termina con su duración y el número de herramientas usadas. Las respuestas se muestran con formato Markdown. Con `NO_COLOR=1`, o si la salida no es una terminal (por ejemplo `relay -p … > respuesta.md`), el texto sale sin colores ni formato; en modo `-p` el encabezado va a stderr para que stdout quede solo con la respuesta.
 
 Cualquier otro `/comando` se busca en tus comandos personalizados; si no existe, se envía al agente (por ejemplo, los comandos propios de Claude Code).
+
+### Sesiones: reanudar y reconectar
+
+Las conversaciones las guarda el agente en la máquina remota, junto a sus credenciales, y quedan asociadas a tu proyecto y al proveedor. Puedes volver a ellas en cualquier momento:
+
+```bash
+relay sessions                     # lista: número, título, cuándo y prefijo del id
+relay -C                           # continúa la más reciente
+relay --resume                     # muestra la lista y eliges
+relay --resume 3                   # por número de la lista…
+relay --resume 9d64850c            # …o por id (basta un prefijo)
+relay -C -p "sigue con lo que hacíamos"   # también sin modo interactivo
+```
+
+Al reanudar, el CLI muestra un resumen de los últimos intercambios y sigues escribiendo con todo el contexto. Dentro de una sesión, `/resume` cambia de conversación sin salir.
+
+```
+  ↺ sesión reanudada · Palabra clave mandarina · 9d64850c
+  › Recuerda esta palabra clave para más adelante: mandarina. Responde solo: ok
+    ok
+  › ¿Cuál era la palabra clave que te pedí recordar?
+    mandarina
+```
+
+**Reconexión automática.** Si se cae la red, se reinicia el daemon o se cae el proceso del agente, el CLI reintenta con espera creciente (hasta 12 veces, unos 2 minutos) y restaura la misma sesión sin que tengas que hacer nada. Si un turno estaba en curso, se interrumpe y puedes repetirlo al reconectar; si se agotan los reintentos, `/reconnect` vuelve a intentarlo.
+
+Ten en cuenta que:
+- Las sesiones son **por proyecto y por máquina**: el espejo se identifica por tu equipo y la ruta del proyecto, así que desde otro computador verás otras sesiones.
+- Son **por proveedor**: una conversación de Claude Code no se puede continuar con OpenCode.
+- Los tres agentes soportados (Claude Code, OpenCode y Codex) permiten reanudar; con Claude Code está verificado de punta a punta.
 
 ## Formatos abiertos en tu proyecto
 
@@ -431,6 +466,7 @@ src/
 └── cli/
     ├── main.ts            # REPL, comandos, permisos, banner y doctor
     ├── input.ts           # editor de entrada: pegado multilínea, historial, atajos
+    ├── sessions.ts        # listar, reanudar y resumir sesiones
     ├── transport.ts       # conexión con el daemon → Stream ACP
     ├── local-tools.ts     # fs y terminales en tu máquina
     ├── project.ts         # raíz del proyecto y archivos en formato abierto
@@ -453,11 +489,10 @@ test/
 
 ## Hoja de ruta
 
-1. ~~Puente MCP de herramientas locales~~ (v0.2) · ~~Preset de OpenCode~~ (v0.3) · ~~Soporte de Windows en el puente~~ (v0.7).
+1. ~~Puente MCP de herramientas locales~~ (v0.2) · ~~Preset de OpenCode~~ (v0.3) · ~~Soporte de Windows en el puente~~ (v0.7) · ~~Reanudar sesiones y reconexión automática~~ (v0.9).
 2. Auditoría y políticas en el puente: registro firmado de operaciones, rutas y comandos prohibidos.
 3. Preset para Codex que desactive su shell interno.
-4. Reconexión y reanudación de sesiones (`session/load`).
-5. Sincronización en vivo de `AGENTS.md` y `.agents/` cuando cambian durante la sesión.
+4. Sincronización en vivo de `AGENTS.md` y `.agents/` cuando cambian durante la sesión.
 
 ## Licencia
 

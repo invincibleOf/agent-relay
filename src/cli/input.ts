@@ -109,6 +109,26 @@ export class InputEditor {
     this.completions = fn;
   }
 
+  get reading(): boolean {
+    return this.active !== null;
+  }
+
+  /**
+   * Imprime texto por encima del campo de entrada sin romperlo (p. ej. avisos
+   * de reconexión mientras el usuario escribe).
+   */
+  printAbove(text: string) {
+    if (!this.active) {
+      this.output.write(`${text}\n`);
+      return;
+    }
+    let seq = this.cursorRow > 0 ? `\x1b[${this.cursorRow}A` : "";
+    seq += `\r\x1b[J${text}\n`;
+    this.output.write(seq);
+    this.cursorRow = 0;
+    this.render();
+  }
+
   read(opts: ReadOptions): Promise<string> {
     if (this.active) return Promise.reject(new Error("ya hay una lectura en curso"));
     this.chars = [];

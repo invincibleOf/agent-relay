@@ -8,7 +8,7 @@
 import { existsSync, lstatSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { Readable, Writable } from "node:stream";
-import { PROTOCOL_VERSION, agent, methods, ndJsonStream } from "@agentclientprotocol/sdk";
+import { PROTOCOL_VERSION, RequestError, agent, methods, ndJsonStream } from "@agentclientprotocol/sdk";
 
 let sessionCwd = "";
 let mcpUrl: string | undefined;
@@ -60,18 +60,70 @@ async function bridgeReport(): Promise<string[]> {
   return out;
 }
 
+// Sesiones persistentes en el workspace espejo, como los agentes reales: sobreviven
+// a que el daemon reinicie el proceso del agente.
+interface StoredSession {
+  cwd: string;
+  title: string | null;
+  updatedAt: string;
+  history: Array<{ user: string; agent: string }>;
+}
+const storeFile = () => path.join(process.cwd(), ".fake-sessions.json");
+const loadStore = (): Record<string, StoredSession> => {
+  try {
+    return JSON.parse(readFileSync(storeFile(), "utf8"));
+  } catch {
+    return {};
+  }
+};
+const saveStore = (s: Record<string, StoredSession>) => writeFileSync(storeFile(), JSON.stringify(s, null, 2));
+
+function attach(params: { cwd: string; mcpServers?: Array<{ name: string } & Record<string, unknown>>; _meta?: unknown }) {
+  sessionCwd = params.cwd;
+  const relay = (params.mcpServers ?? []).find((s) => s.name === "relay");
+  mcpUrl = relay && typeof relay.url === "string" ? relay.url : undefined;
+  sessionMeta = (params._meta ?? {}) as Record<string, unknown>;
+}
+
 const app = agent({ name: "fake-agent" })
   .onRequest(methods.agent.initialize, () => ({
     protocolVersion: PROTOCOL_VERSION,
-    agentCapabilities: { loadSession: false, mcpCapabilities: { http: true } },
+    agentCapabilities: { loadSession: true, mcpCapabilities: { http: true }, sessionCapabilities: { list: {}, resume: {} } },
     agentInfo: { name: "fake-agent", version: "0.0.1" },
   }))
   .onRequest(methods.agent.session.new, ({ params }) => {
-    sessionCwd = params.cwd;
-    const relay = params.mcpServers.find((s) => s.name === "relay");
-    mcpUrl = relay && "url" in relay ? relay.url : undefined;
-    sessionMeta = (params._meta ?? {}) as Record<string, unknown>;
-    return { sessionId: "fake-session-1" };
+    attach(params);
+    const sessionId = `ses-${Math.random().toString(16).slice(2, 10)}`;
+    const store = loadStore();
+    store[sessionId] = { cwd: params.cwd, title: null, updatedAt: new Date().toISOString(), history: [] };
+    saveStore(store);
+    return { sessionId };
+  })
+  .onRequest(methods.agent.session.list, ({ params }) => ({
+    sessions: Object.entries(loadStore())
+      .filter(([, s]) => !params.cwd || s.cwd === params.cwd)
+      .map(([sessionId, s]) => ({ sessionId, cwd: s.cwd, title: s.title, updatedAt: s.updatedAt })),
+  }))
+  .onRequest(methods.agent.session.load, async ({ params, client }) => {
+    const stored = loadStore()[params.sessionId];
+    if (!stored) throw RequestError.resourceNotFound(params.sessionId);
+    attach(params);
+    for (const h of stored.history) {
+      await client.notify(methods.client.session.update, {
+        sessionId: params.sessionId,
+        update: { sessionUpdate: "user_message_chunk", content: { type: "text", text: h.user } },
+      });
+      await client.notify(methods.client.session.update, {
+        sessionId: params.sessionId,
+        update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: h.agent } },
+      });
+    }
+    return {};
+  })
+  .onRequest(methods.agent.session.resume, ({ params }) => {
+    if (!loadStore()[params.sessionId]) throw RequestError.resourceNotFound(params.sessionId);
+    attach(params);
+    return {};
   })
   .onRequest(methods.agent.session.prompt, async ({ params, client }) => {
     const report: string[] = [];
@@ -82,6 +134,28 @@ const app = agent({ name: "fake-agent" })
       });
 
     const promptText = params.prompt.map((b) => (b.type === "text" ? b.text : `[${b.type}:${"uri" in b ? b.uri : ""}]`)).join(" ");
+
+    if (promptText.startsWith("MUERE")) process.exit(3); // simula que el agente se cae a mitad de turno
+    if (promptText.startsWith("ECO ")) {
+      const store = loadStore();
+      const stored = store[params.sessionId];
+      const text = promptText.slice(4);
+      const reply = `eco: ${text} (historial: ${(stored?.history.length ?? 0) + 1})`;
+      if (stored) {
+        stored.history.push({ user: promptText, agent: reply });
+        if (!stored.title) {
+          stored.title = `Sesión de ${text}`;
+          await client.notify(methods.client.session.update, {
+            sessionId: params.sessionId,
+            update: { sessionUpdate: "session_info_update", title: stored.title },
+          });
+        }
+        stored.updatedAt = new Date().toISOString();
+        saveStore(store);
+      }
+      await say(`${reply}\n`);
+      return { stopReason: "end_turn" };
+    }
 
     if (promptText.startsWith("PUENTE")) {
       const lines = await bridgeReport();

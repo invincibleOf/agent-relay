@@ -14,10 +14,11 @@ import {
   type RequestPermissionRequest,
   type RequestPermissionResponse,
   type SessionConfigOption,
+  type SessionInfo,
   type SessionModeState,
 } from "@agentclientprotocol/sdk";
 import type { ProjectFile, ReadyFrame } from "../shared/protocol.js";
-import { box, rows, termWidth, tildify, truncate, truncateStart, visibleWidth } from "../shared/ui.js";
+import { box, rows, stripAnsi, termWidth, tildify, truncate, truncateStart, visibleWidth } from "../shared/ui.js";
 import { packageVersion } from "../shared/version.js";
 import { INIT_PROMPT, expandTemplate, loadCustomCommands } from "./commands.js";
 import { configDir, defaultCliConfigPath, loadCliConfig, resolveHost, type ResolvedHost } from "./config.js";
@@ -25,7 +26,20 @@ import { InputEditor } from "./input.js";
 import { LocalTools } from "./local-tools.js";
 import { collectProjectFiles, findProjectRoot, projectId } from "./project.js";
 import { Renderer, st } from "./render.js";
-import { connectRelay } from "./transport.js";
+import {
+  canList,
+  canRestore,
+  lastRememberedSession,
+  listSessions,
+  pickSession,
+  rememberSession,
+  restoreSession,
+  sessionRows,
+  transcriptLines,
+  type ActiveSession,
+  type ReplayTurn,
+} from "./sessions.js";
+import { connectRelay, type RelayConnection } from "./transport.js";
 
 const HELP = `${st.bold(st.accent("◆ agent-relay"))} ${st.gray(`v${packageVersion()}`)}
 Agentes de código que corren en otra máquina y trabajan sobre tu proyecto local.
@@ -33,13 +47,18 @@ Agentes de código que corren en otra máquina y trabajan sobre tu proyecto loca
 ${st.bold("Uso")}
   relay [opciones]                 Sesión interactiva
   relay [opciones] -p "<prompt>"   Un solo prompt y salir
+  relay -C                         Continúa la última sesión de este proyecto
+  relay --resume [id]              Elige una sesión anterior (o reanuda la indicada)
+  relay sessions                   Lista las sesiones de este proyecto
   relay doctor [opciones]          Verifica conexión, agente, puente y ripgrep
 
 ${st.bold("Opciones")}
   -H, --host <nombre>     Host definido en ${tildify(defaultCliConfigPath())}
   -a, --agent <nombre>    Proveedor en el daemon (claude, codex, opencode…)
       --url <ws(s)://…>   Conexión directa (requiere RELAY_TOKEN)
-  -p, --print <prompt>    Modo no interactivo
+  -p, --print <prompt>    Modo no interactivo (combinable con -C o --resume <id>)
+  -C, --continue          Continúa la última sesión de este proyecto
+  -r, --resume [id]       Reanuda una sesión; sin id muestra la lista
   -y, --yes               Aprueba automáticamente los permisos que pida el agente
       --cwd <ruta>        Carpeta del proyecto (por defecto la actual)
       --thoughts          Muestra el razonamiento del agente si lo envía
@@ -53,11 +72,13 @@ Dentro de la sesión escribe ${st.cyan("/help")} para ver los comandos.
 const BUILTIN_COMMANDS: Array<[string, string]> = [
   ["/help", "Esta ayuda"],
   ["/new", "Nueva sesión con el agente"],
+  ["/resume [n|id]", "Lista las sesiones de este proyecto y reanuda una"],
   ["/init", "Crea o mejora AGENTS.md (formato abierto)"],
   ["/model [id]", "Muestra o cambia el modelo"],
   ["/mode [id]", "Muestra o cambia el modo del agente"],
   ["/commands", "Comandos personalizados y del agente"],
   ["/status", "Conexión, agente, puente y sesión"],
+  ["/reconnect", "Reconecta con el daemon si se perdió la conexión"],
   ["/clear", "Limpia la pantalla"],
   ["/exit", "Salir"],
 ];
@@ -71,14 +92,40 @@ interface Context {
   renderer: Renderer;
 }
 
+/**
+ * `--resume` acepta un id opcional ("relay --resume" lista, "relay --resume abc"
+ * reanuda), algo que parseArgs no admite: se extrae antes.
+ */
+function extractResume(argv: string[]): { argv: string[]; resume?: string | true } {
+  const out: string[] = [];
+  let resume: string | true | undefined;
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === "--resume" || a === "-r") {
+      const next = argv[i + 1];
+      if (next !== undefined && !next.startsWith("-")) {
+        resume = next;
+        i++;
+      } else resume = true;
+    } else if (a.startsWith("--resume=")) resume = a.slice("--resume=".length) || true;
+    else out.push(a);
+  }
+  return { argv: out, resume };
+}
+
+const RECONNECT_ATTEMPTS = 12;
+
 async function main() {
+  const pre = extractResume(process.argv.slice(2));
   const { values, positionals } = parseArgs({
+    args: pre.argv,
     allowPositionals: true,
     options: {
       host: { type: "string", short: "H" },
       agent: { type: "string", short: "a" },
       url: { type: "string" },
       print: { type: "string", short: "p" },
+      continue: { type: "boolean", short: "C" },
       yes: { type: "boolean", short: "y" },
       cwd: { type: "string" },
       thoughts: { type: "boolean" },
@@ -93,20 +140,18 @@ async function main() {
 
   const subcommand = positionals[0];
   const isDoctor = subcommand === "doctor";
-  const interactive = values.print === undefined && !isDoctor;
+  const isSessions = subcommand === "sessions";
+  const interactive = values.print === undefined && !isDoctor && !isSessions;
   const cfg = loadCliConfig(values.config ?? defaultCliConfigPath());
   const host = resolveHost(cfg, values.host, values.url);
   const autoApprove = values.yes ?? cfg.permissions.autoApprove;
 
   const root = findProjectRoot(values.cwd ?? process.cwd());
+  const pid = projectId(root);
   const { files, warnings: projectWarnings } = collectProjectFiles(root);
 
   const renderer = new Renderer(values.thoughts ?? false);
   const tools = new LocalTools(root, cfg.permissions.extraRoots, (k, d) => renderer.local(k, d));
-
-  if (interactive) process.stdout.write(st.gray(`  conectando con ${host.url}…\r`));
-  const relay = await connectRelay({ host, provider: values.agent, project: { root, id: projectId(root), files } });
-  if (interactive) process.stdout.write("\x1b[2K");
 
   // En una terminal se usa el editor propio (pegado de varias líneas, historial);
   // si la entrada viene de una tubería, readline línea por línea.
@@ -119,6 +164,8 @@ async function main() {
     return fallback.question(prompt);
   };
   const ask = (q: string) => readInput(q, false, false);
+  /** Avisos que pueden llegar mientras el usuario escribe (reconexión). */
+  const notify = (text: string) => (editor?.reading ? editor.printAbove(text) : renderer.line(text));
 
   const app = client({ name: "agent-relay" })
     .onRequest(methods.client.fs.readTextFile, ({ params }) => tools.readTextFile(params))
@@ -133,54 +180,203 @@ async function main() {
     )
     .onNotification(methods.client.session.update, ({ params }) => renderer.update(params));
 
-  const acp = app.connect(relay.stream);
-  relay.closed.then(({ code, reason }) => {
+  // ── Conexión con el daemon (se puede reabrir) ─────────────────────────────
+  interface Live {
+    relay: RelayConnection;
+    acp: ClientConnection;
+    init: InitializeResponse;
+    open: boolean;
+  }
+  let closing = false;
+  let reconnecting: Promise<boolean> | null = null;
+  let session: ActiveSession | undefined;
+
+  const openLive = async (): Promise<Live> => {
+    const relay = await connectRelay({ host, provider: values.agent, project: { root, id: pid, files } });
+    const acp = app.connect(relay.stream);
+    const live: Live = { relay, acp, init: undefined as unknown as InitializeResponse, open: true };
+    relay.closed.then(({ code, reason }) => onClosed(live, code, reason));
+    live.init = await acp.agent.request(methods.agent.initialize, {
+      protocolVersion: PROTOCOL_VERSION,
+      clientCapabilities: { fs: { readTextFile: true, writeTextFile: true }, terminal: true },
+      clientInfo: { name: "agent-relay", title: "agent-relay CLI", version: packageVersion() },
+    });
+    return live;
+  };
+
+  const onClosed = (l: Live, code: number, reason: string) => {
+    l.open = false;
     tools.disposeAll();
-    if (code !== 1000 || reason) renderer.line(st.yellow(`  ! conexión con el daemon cerrada (${code}${reason ? ` ${reason}` : ""})`));
-    acp.close();
-  });
+    l.acp.close();
+    if (closing || l !== live) return;
+    const why = `${code}${reason ? ` ${reason}` : ""}`;
+    if (!interactive) {
+      renderer.line(st.yellow(`  ! conexión con el daemon cerrada (${why})`));
+      return;
+    }
+    notify(st.yellow(`  ! se perdió la conexión con el daemon (${why})`));
+    void reconnect();
+  };
 
-  const init = await acp.agent.request(methods.agent.initialize, {
-    protocolVersion: PROTOCOL_VERSION,
-    clientCapabilities: { fs: { readTextFile: true, writeTextFile: true }, terminal: true },
-    clientInfo: { name: "agent-relay", title: "agent-relay CLI", version: packageVersion() },
-  });
+  /** Reintenta con espera creciente y restaura la sesión actual sin reproducirla. */
+  const reconnect = (): Promise<boolean> =>
+    (reconnecting ??= (async () => {
+      for (let attempt = 1; attempt <= RECONNECT_ATTEMPTS && !closing; attempt++) {
+        try {
+          const next = await openLive();
+          live = next;
+          ctx.ready = next.relay.ready;
+          ctx.init = next.init;
+          if (session) {
+            const restored = await restoreSession(next.acp, next.init, root, session.id, false);
+            session = { ...session, ...restored };
+            renderer.configOptions = restored.configOptions;
+          }
+          notify(st.green(`  ✓ reconectado${session ? " · sesión restaurada" : ""}`));
+          return true;
+        } catch (err) {
+          const delay = Math.min(15_000, 1000 * 2 ** (attempt - 1));
+          if (attempt === RECONNECT_ATTEMPTS) break;
+          const why = (err as Error).message.replace(/^No se pudo conectar a \S+:\s*/, "");
+          notify(st.gray(`  reconectando en ${Math.round(delay / 1000)} s · intento ${attempt + 1}/${RECONNECT_ATTEMPTS} · ${truncate(why, 50)}`));
+          await new Promise((r) => setTimeout(r, delay));
+        }
+      }
+      if (!closing) notify(st.red("  ✗ no se pudo reconectar con el daemon. Escribe /reconnect para intentarlo de nuevo."));
+      return false;
+    })().finally(() => {
+      reconnecting = null;
+    }));
 
-  const ctx: Context = { host, ready: relay.ready, init, root, files, renderer };
+  /** La conexión actual, esperando a una reconexión en curso. */
+  const getLive = async (): Promise<Live> => {
+    if (reconnecting) await reconnecting;
+    if (!live.open) throw new Error("sin conexión con el daemon; escribe /reconnect");
+    return live;
+  };
+
+  const shutdown = () => {
+    closing = true;
+    editor?.stop();
+    fallback?.close();
+    live.relay.close();
+  };
+
+  if (interactive) process.stdout.write(st.gray(`  conectando con ${host.url}…\r`));
+  let live = await openLive();
+  if (interactive) process.stdout.write("\x1b[2K");
+
+  const ctx: Context = { host, ready: live.relay.ready, init: live.init, root, files, renderer };
   const warnings = [...projectWarnings, ...connectionWarnings(ctx)];
 
   if (isDoctor) {
     printDoctor(ctx, warnings);
-    relay.close();
+    shutdown();
     return;
   }
 
-  let session = await newSession(acp, root, renderer);
+  if (isSessions) {
+    printSessionList(await listSessions(live.acp, live.init, root), ctx);
+    shutdown();
+    return;
+  }
+
+  // ── Sesión inicial: nueva, la última (-C) o una elegida (--resume) ───────
+  const startNew = async () => {
+    const created = await newSession(live.acp, root, renderer);
+    rememberSession(pid, live.relay.ready.provider, created.id);
+    return created;
+  };
+
+  /** Restaura una sesión y devuelve el resumen de su conversación. */
+  const resumeById = async (id: string, info?: SessionInfo): Promise<string[]> => {
+    renderer.sessionTitle = undefined;
+    renderer.beginReplay();
+    let turns: ReplayTurn[] = [];
+    try {
+      const restored = await restoreSession(live.acp, live.init, root, id, true);
+      session = { ...restored, title: info?.title };
+      renderer.configOptions = restored.configOptions;
+      if (restored.modes?.currentModeId) renderer.currentMode = restored.modes.currentModeId;
+    } finally {
+      turns = renderer.endReplay();
+    }
+    rememberSession(pid, live.relay.ready.provider, id);
+    const title = info?.title ? ` · ${st.bold(truncate(info.title, 60))}` : "";
+    return [`  ${st.accent("↺")} sesión reanudada${title} ${st.gray(`· ${id.slice(0, 8)}`)}`, ...transcriptLines(turns, st, termWidth())];
+  };
+
+  /** Lista las sesiones y deja elegir una. Devuelve undefined si se cancela. */
+  const chooseSession = async (): Promise<SessionInfo | undefined> => {
+    const sessions = await listSessions(live.acp, live.init, root);
+    if (!sessions.length) {
+      renderer.line(st.gray("  No hay sesiones anteriores de este proyecto con este agente."));
+      return undefined;
+    }
+    const shown = sessions.slice(0, 20);
+    renderer.line();
+    for (const l of sessionRows(shown, st, termWidth(), session?.id)) renderer.line(l);
+    if (sessions.length > shown.length) renderer.line(st.gray(`  … y ${sessions.length - shown.length} más (relay sessions las muestra todas)`));
+    let answer: string;
+    try {
+      answer = await ask(`\n  ${st.accent("›")} número o id de la sesión ${st.gray("(Enter cancela)")}: `);
+    } catch {
+      return undefined;
+    }
+    if (!answer.trim()) return undefined;
+    const picked = pickSession(sessions, answer);
+    if (!picked) renderer.line(st.red(`  ✗ no encontré la sesión "${answer.trim()}"`));
+    return picked;
+  };
+
+  let resumeSummary: string[] = [];
+  const wantsResume = pre.resume !== undefined || values.continue;
+  if (wantsResume && !canRestore(live.init)) {
+    warnings.push(`${live.relay.ready.provider} no permite reanudar sesiones; se abre una nueva.`);
+  } else if (typeof pre.resume === "string") {
+    const sessions = canList(live.init) ? await listSessions(live.acp, live.init, root) : [];
+    const info = pickSession(sessions, pre.resume);
+    resumeSummary = await resumeById(info?.sessionId ?? pre.resume, info);
+  } else if (pre.resume === true) {
+    if (!interactive) throw new Error("--resume sin id solo funciona en modo interactivo; usa relay sessions para ver los ids");
+    const picked = await chooseSession();
+    if (picked) resumeSummary = await resumeById(picked.sessionId, picked);
+  } else if (values.continue) {
+    const sessions = canList(live.init) ? await listSessions(live.acp, live.init, root) : [];
+    const lastId = sessions[0]?.sessionId ?? lastRememberedSession(pid, live.relay.ready.provider);
+    if (lastId) resumeSummary = await resumeById(lastId, sessions.find((x) => x.sessionId === lastId));
+    else warnings.push("no hay sesiones anteriores de este proyecto; se abre una nueva.");
+  }
+  if (!session) session = await startNew();
 
   if (!interactive) {
     // En modo -p la salida estándar queda para la respuesta; el encabezado va a stderr.
-    process.stderr.write(st.gray(`agent-relay v${packageVersion()} · ${relay.ready.provider} en ${relay.ready.daemon.hostname}\n`));
+    process.stderr.write(st.gray(`agent-relay v${packageVersion()} · ${live.relay.ready.provider} en ${live.relay.ready.daemon.hostname}\n`));
+    if (resumeSummary.length) process.stderr.write(st.gray(`${stripAnsi(resumeSummary[0]).trim()}\n`));
     for (const w of warnings) process.stderr.write(st.yellow(`! ${w}\n`));
-    const stop = await runTurn(acp, session.id, buildPrompt(values.print ?? "", process.cwd()), renderer, false);
+    const stop = await runTurn(live.acp, session!.id, buildPrompt(values.print ?? "", process.cwd()), renderer, false);
     renderer.newline();
-    relay.close();
+    shutdown();
     process.exitCode = stop === "error" ? 1 : 0;
     return;
   }
 
-  printBanner(ctx, session, warnings);
+  printBanner(ctx, session!, warnings);
+  if (resumeSummary.length) {
+    renderer.line();
+    for (const l of resumeSummary) renderer.line(l);
+  }
 
   let turnActive = false;
   let lastSigint = 0;
   const onInterrupt = () => {
-    if (turnActive) {
+    if (turnActive && session) {
       renderer.line(st.yellow("  cancelando…"));
-      void acp.agent.notify(methods.agent.session.cancel, { sessionId: session.id });
+      if (live.open) void live.acp.agent.notify(methods.agent.session.cancel, { sessionId: session.id });
       return;
     }
     if (Date.now() - lastSigint < 1500) {
-      editor?.stop();
-      relay.close();
+      shutdown();
       process.exit(0);
     }
     lastSigint = Date.now();
@@ -214,80 +410,111 @@ async function main() {
     if (input.startsWith("/")) {
       const [cmd, ...rest] = input.slice(1).split(" ");
       const args = rest.join(" ").trim();
-      switch (cmd) {
-        case "exit":
-        case "quit":
-          editor?.stop();
-          fallback?.close();
-          relay.close();
-          return;
-        case "help":
-          printHelp(renderer, commands().size);
-          continue;
-        case "clear":
-          process.stdout.write("\x1b[2J\x1b[H");
-          continue;
-        case "new":
-          session = await newSession(acp, root, renderer);
-          renderer.line(st.gray(`  nueva sesión ${session.id.slice(0, 8)}`));
-          continue;
-        case "status":
-          renderer.line();
-          for (const l of statusRows(ctx, session)) renderer.line(l);
-          continue;
-        case "modes":
-        case "mode":
-          if (!args) {
-            renderModes(session.modes, renderer);
+      try {
+        switch (cmd) {
+          case "exit":
+          case "quit":
+            shutdown();
+            return;
+          case "help":
+            printHelp(renderer, commands().size);
+            continue;
+          case "clear":
+            process.stdout.write("\x1b[2J\x1b[H");
+            continue;
+          case "new": {
+            const l = await getLive();
+            session = await newSession(l.acp, root, renderer);
+            renderer.sessionTitle = undefined;
+            rememberSession(pid, l.relay.ready.provider, session.id);
+            renderer.line(st.gray(`  nueva sesión ${session.id.slice(0, 8)}`));
             continue;
           }
-          try {
-            await acp.agent.request(methods.agent.session.setMode, { sessionId: session.id, modeId: args });
+          case "resume":
+          case "sessions": {
+            const l = await getLive();
+            if (!canRestore(l.init)) {
+              renderer.line(st.gray(`  ${l.relay.ready.provider} no permite reanudar sesiones.`));
+              continue;
+            }
+            let target: SessionInfo | undefined;
+            if (args) {
+              const sessions = await listSessions(l.acp, l.init, root);
+              target = pickSession(sessions, args) ?? { sessionId: args, cwd: root };
+            } else target = await chooseSession();
+            if (!target) continue;
+            if (target.sessionId === session?.id) {
+              renderer.line(st.gray("  Ya estás en esa sesión."));
+              continue;
+            }
+            renderer.line();
+            for (const line of await resumeById(target.sessionId, target)) renderer.line(line);
+            continue;
+          }
+          case "reconnect":
+            if (live.open && !reconnecting) renderer.line(st.gray("  La conexión con el daemon está activa."));
+            else await reconnect();
+            continue;
+          case "status":
+            renderer.line();
+            for (const l of statusRows(ctx, session!, live.open)) renderer.line(l);
+            continue;
+          case "modes":
+          case "mode": {
+            if (!args) {
+              renderModes(session!.modes, renderer);
+              continue;
+            }
+            const l = await getLive();
+            await l.acp.agent.request(methods.agent.session.setMode, { sessionId: session!.id, modeId: args });
             renderer.currentMode = args;
             renderer.line(st.gray(`  modo → ${args}`));
-          } catch (err) {
-            renderer.line(st.red(`  ✗ no se pudo cambiar de modo: ${(err as Error).message}`));
+            continue;
           }
-          continue;
-        case "model":
-        case "models":
-          await modelCommand(acp, session.id, args, renderer);
-          continue;
-        case "commands": {
-          const custom = [...commands().values()];
-          renderer.line();
-          renderer.line(`  ${st.bold("Personalizados")} ${st.gray(".agents/commands")}`);
-          if (!custom.length) renderer.line(st.gray("    (ninguno)"));
-          for (const l of rows(custom.map((c) => [`/${c.name}`, `${c.description} ${st.gray(`[${c.source}]`)}`]), st, "    ")) renderer.line(l);
-          renderer.line(`  ${st.bold("Del agente")} ${st.gray(relay.ready.provider)}`);
-          if (!renderer.availableCommands.length) renderer.line(st.gray("    (ninguno anunciado)"));
-          for (const l of rows(renderer.availableCommands.map((c) => [`/${c.name}`, st.gray(truncate(c.description, 70))]), st, "    ")) {
-            renderer.line(l);
+          case "model":
+          case "models":
+            await modelCommand((await getLive()).acp, session!.id, args, renderer);
+            continue;
+          case "commands": {
+            const custom = [...commands().values()];
+            renderer.line();
+            renderer.line(`  ${st.bold("Personalizados")} ${st.gray(".agents/commands")}`);
+            if (!custom.length) renderer.line(st.gray("    (ninguno)"));
+            for (const l of rows(custom.map((c) => [`/${c.name}`, `${c.description} ${st.gray(`[${c.source}]`)}`]), st, "    ")) renderer.line(l);
+            renderer.line(`  ${st.bold("Del agente")} ${st.gray(ctx.ready.provider)}`);
+            if (!renderer.availableCommands.length) renderer.line(st.gray("    (ninguno anunciado)"));
+            for (const l of rows(renderer.availableCommands.map((c) => [`/${c.name}`, st.gray(truncate(c.description, 70))]), st, "    ")) {
+              renderer.line(l);
+            }
+            continue;
           }
-          continue;
+          case "init":
+            promptText = INIT_PROMPT + (args ? `\n\nIndicaciones adicionales: ${args}` : "");
+            break;
+          default: {
+            const custom = commands().get(cmd);
+            if (custom) promptText = expandTemplate(custom.template, args);
+            // si no, se envía tal cual: puede ser un comando del propio agente
+          }
         }
-        case "init":
-          promptText = INIT_PROMPT + (args ? `\n\nIndicaciones adicionales: ${args}` : "");
-          break;
-        default: {
-          const custom = commands().get(cmd);
-          if (custom) promptText = expandTemplate(custom.template, args);
-          // si no, se envía tal cual: puede ser un comando del propio agente
-        }
+      } catch (err) {
+        renderer.line(st.red(`  ✗ ${(err as Error).message}`));
+        continue;
       }
     }
 
     turnActive = true;
     try {
-      await runTurn(acp, session.id, buildPrompt(promptText, process.cwd()), renderer, true);
+      const l = await getLive();
+      await runTurn(l.acp, session!.id, buildPrompt(promptText, process.cwd()), renderer, true);
+    } catch (err) {
+      renderer.line(st.red(`  ✗ ${(err as Error).message}`));
     } finally {
       turnActive = false;
     }
   }
 
-  editor?.stop();
-  fallback?.close();
-  relay.close();
+  shutdown();
 }
 
 // ─── Presentación ────────────────────────────────────────────────────────────
@@ -365,11 +592,11 @@ function printHelp(renderer: Renderer, customCount: number) {
   );
 }
 
-function statusRows(ctx: Context, session: { id: string; modes: SessionModeState | null }): string[] {
+function statusRows(ctx: Context, session: ActiveSession, connected: boolean): string[] {
   const { ready, init, host, renderer } = ctx;
   const entries: Array<[string, string]> = [
     ["host", `${host.name === "url" ? "RELAY_URL" : host.name} ${st.gray(host.url)}`],
-    ["daemon", `${ready.daemon.hostname} ${st.gray(`v${ready.daemon.version}`)}`],
+    ["daemon", `${ready.daemon.hostname} ${st.gray(`v${ready.daemon.version}`)}${connected ? "" : `  ${st.red("desconectado")}`}`],
     ["agente", `${ready.provider} ${st.gray(`${shortAgentName(init.agentInfo?.name)} ${init.agentInfo?.version ?? ""}`)}`],
   ];
   const model = renderer.configValue("model");
@@ -380,8 +607,20 @@ function statusRows(ctx: Context, session: { id: string; modes: SessionModeState
   if (mode) entries.push(["modo", mode]);
   entries.push(["puente", bridgeLabel(ready)]);
   entries.push(["espejo", st.gray(tildify(ready.remoteWorkspace))]);
-  entries.push(["sesión", st.gray(session.id)]);
+  const title = renderer.sessionTitle ?? session.title;
+  entries.push(["sesión", `${title ? `${truncate(title, 50)} ` : ""}${st.gray(session.id)}`]);
   return rows(entries, st);
+}
+
+function printSessionList(sessions: SessionInfo[], ctx: Context) {
+  const { ready, root } = ctx;
+  process.stdout.write(`\n  ${st.bold(st.accent("◆ sesiones"))}  ${st.gray(`${ready.provider} · ${tildify(root)}`)}\n\n`);
+  if (!sessions.length) {
+    process.stdout.write(st.gray("  No hay sesiones anteriores de este proyecto con este agente.\n\n"));
+    return;
+  }
+  for (const l of sessionRows(sessions, st, termWidth())) process.stdout.write(`${l}\n`);
+  process.stdout.write(st.gray(`\n  Reanuda con: relay --resume <número o id>   ·   la última: relay -C\n\n`));
 }
 
 function printDoctor(ctx: Context, warnings: string[]) {
@@ -507,12 +746,12 @@ function connectionWarnings(ctx: Context): string[] {
   return out;
 }
 
-async function newSession(acp: ClientConnection, root: string, renderer: Renderer) {
+async function newSession(acp: ClientConnection, root: string, renderer: Renderer): Promise<ActiveSession> {
   try {
     const res = await acp.agent.request(methods.agent.session.new, { cwd: root, mcpServers: [] });
     if (res.modes?.currentModeId) renderer.currentMode = res.modes.currentModeId;
     renderer.configOptions = res.configOptions ?? [];
-    return { id: res.sessionId, modes: res.modes ?? null };
+    return { id: res.sessionId, modes: res.modes ?? null, configOptions: res.configOptions ?? [] };
   } catch (err) {
     const e = err as { code?: number; message?: string };
     if (e.code === -32000) {
@@ -536,7 +775,12 @@ async function runTurn(acp: ClientConnection, sessionId: string, prompt: Content
     }
     return res.stopReason;
   } catch (err) {
-    renderer.line(st.red(`  ✗ ${(err as Error).message}`));
+    const msg = (err as Error).message;
+    renderer.line(
+      /connection closed|conexión con el daemon cerrada/i.test(msg)
+        ? st.yellow("  ✗ el turno se interrumpió porque se perdió la conexión; cuando se reconecte puedes repetirlo")
+        : st.red(`  ✗ ${msg}`),
+    );
     return "error" as const;
   }
 }

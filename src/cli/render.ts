@@ -1,6 +1,7 @@
 import type { AvailableCommand, SessionConfigOption, SessionNotification, ToolCallContent } from "@agentclientprotocol/sdk";
 import { isTTY, makeStyles, tildify, truncate, termWidth } from "../shared/ui.js";
 import { MarkdownStream, inline } from "./markdown.js";
+import type { ReplayTurn } from "./sessions.js";
 
 /** Quita marcadores de Markdown (para texto que se muestra atenuado). */
 const stripMarkers = (s: string) => s.replace(/\*\*|__|`/g, "");
@@ -28,6 +29,8 @@ const LOCAL_LABEL: Record<LocalKind, string> = {
 /** Dibuja en la terminal lo que hace el agente durante un turno. */
 export class Renderer {
   availableCommands: AvailableCommand[] = [];
+  /** Título de la sesión si el agente lo anuncia (session_info_update). */
+  sessionTitle?: string;
   configOptions: SessionConfigOption[] = [];
   currentMode?: string;
   private midLine = false;
@@ -88,8 +91,54 @@ export class Renderer {
     this.line(st.gray(`  ── ${parts.join(" · ")}`));
   }
 
+  /** Mientras se reanuda una sesión, la conversación reproducida se recoge sin imprimirse. */
+  private replay: ReplayTurn[] | null = null;
+
+  beginReplay() {
+    this.replay = [];
+  }
+
+  endReplay(): ReplayTurn[] {
+    const turns = this.replay ?? [];
+    this.replay = null;
+    return turns;
+  }
+
+  private collectReplay(u: SessionNotification["update"]): boolean {
+    const turns = this.replay!;
+    const last = turns[turns.length - 1];
+    switch (u.sessionUpdate) {
+      case "user_message_chunk":
+        if (u.content.type !== "text") return true;
+        if (!last || last.agent || last.tools) turns.push({ user: u.content.text, agent: "", tools: 0 });
+        else last.user += u.content.text;
+        return true;
+      case "agent_message_chunk":
+        if (u.content.type !== "text") return true;
+        if (!last) turns.push({ user: "", agent: u.content.text, tools: 0 });
+        else last.agent += u.content.text;
+        return true;
+      case "tool_call":
+        if (!last) turns.push({ user: "", agent: "", tools: 1 });
+        else last.tools++;
+        return true;
+      case "available_commands_update":
+      case "config_option_update":
+      case "current_mode_update":
+      case "session_info_update":
+        return false; // el estado sí se aplica
+      default:
+        return true; // planes, pensamientos y actualizaciones de herramientas se omiten
+    }
+  }
+
   update(n: SessionNotification) {
     const u = n.update;
+    if (this.replay && this.collectReplay(u)) return;
+    if (this.replay && u.sessionUpdate === "current_mode_update") {
+      this.currentMode = u.currentModeId;
+      return;
+    }
     switch (u.sessionUpdate) {
       case "agent_message_chunk":
         if (u.content.type !== "text") break;
@@ -157,6 +206,10 @@ export class Renderer {
 
       case "config_option_update":
         this.configOptions = u.configOptions;
+        break;
+
+      case "session_info_update":
+        if (typeof u.title === "string" && u.title.trim()) this.sessionTitle = u.title.trim();
         break;
 
       default:

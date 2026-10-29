@@ -197,6 +197,69 @@ describe("relay de punta a punta con un agente falso", () => {
     assert.match(r.stdout, /^DISALLOWED_READ=no$/m);
   });
 
+  test("-C continúa la última sesión, sessions las lista y --resume elige una", async () => {
+    const url = ["--url", `ws://127.0.0.1:${port}/acp`];
+    let r = await runCli([...url, "-p", "ECO uno"]);
+    assert.match(r.stdout, /eco: uno \(historial: 1\)/, r.stderr);
+
+    r = await runCli([...url, "-C", "-p", "ECO dos"]);
+    assert.match(r.stdout, /eco: dos \(historial: 2\)/, r.stderr);
+    assert.match(r.stderr, /sesión reanudada · Sesión de uno/);
+
+    r = await runCli([...url, "-p", "ECO otra"]); // una sesión nueva
+    assert.match(r.stdout, /eco: otra \(historial: 1\)/);
+
+    r = await runCli([...url, "sessions"]);
+    assert.equal(r.code, 0, r.stderr);
+    const rowUno = r.stdout.split("\n").find((l) => l.includes("Sesión de uno"));
+    const rowOtra = r.stdout.split("\n").find((l) => l.includes("Sesión de otra"));
+    assert.ok(rowUno && rowOtra, r.stdout);
+    assert.ok(r.stdout.indexOf("Sesión de otra") < r.stdout.indexOf("Sesión de uno"), "la más reciente primero");
+
+    // Por prefijo de id (como lo muestra la lista) y por número.
+    const idUno = /\b(ses-\w{4})/.exec(rowUno!)![1];
+    r = await runCli([...url, "--resume", idUno, "-p", "ECO tres"]);
+    assert.match(r.stdout, /eco: tres \(historial: 3\)/, r.stderr);
+    r = await runCli([...url, "--resume", "1", "-p", "ECO cuatro"]); // ahora la más reciente es "uno"
+    assert.match(r.stdout, /eco: cuatro \(historial: 4\)/, r.stderr);
+
+    r = await runCli([...url, "--resume", "no-existe", "-p", "ECO x"]);
+    assert.equal(r.code, 1);
+  });
+
+  test("si se cae la conexión, el CLI se reconecta y sigue en la misma sesión", async () => {
+    const child = spawn(process.execPath, ["--import", tsxLoader, path.join(repo, "src/cli/main.ts"), "--url", `ws://127.0.0.1:${port}/acp`], {
+      cwd: project,
+      env: { ...process.env, XDG_CONFIG_HOME: path.join(base, "config"), RELAY_TOKEN: token },
+    });
+    let out = "";
+    child.stdout.on("data", (d) => (out += d));
+    child.stderr.on("data", (d) => (out += d));
+    const waitFor = (re: RegExp, ms = 30_000) =>
+      new Promise<void>((resolve, reject) => {
+        const t0 = Date.now();
+        const tick = () => (re.test(out) ? resolve() : Date.now() - t0 > ms ? reject(new Error(`no apareció ${re}:\n${out}`)) : setTimeout(tick, 50));
+        tick();
+      });
+    try {
+      await waitFor(/› $/m);
+      child.stdin.write("ECO r1\n");
+      await waitFor(/eco: r1 \(historial: 1\)/);
+      child.stdin.write("MUERE\n"); // el proceso del agente termina a mitad del turno
+      await waitFor(/se perdió la conexión con el daemon/);
+      await waitFor(/✓ reconectado · sesión restaurada/);
+      child.stdin.write("ECO r2\n");
+      await waitFor(/eco: r2 \(historial: 2\)/);
+      child.stdin.write("/status\n");
+      await waitFor(/sesión\s+Sesión de r1/);
+      child.stdin.write("/exit\n");
+      const code = await new Promise((r) => child.on("close", r));
+      assert.equal(code, 0, out);
+    } finally {
+      child.kill();
+    }
+  });
+
   test("doctor muestra el agente y el workspace espejo", async () => {
     const r = await runCli(["doctor", "--url", `ws://127.0.0.1:${port}/acp`]);
     assert.equal(r.code, 0, r.stderr);
