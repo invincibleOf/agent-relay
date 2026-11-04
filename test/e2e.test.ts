@@ -260,6 +260,19 @@ describe("relay de punta a punta con un agente falso", () => {
     }
   });
 
+  test("imágenes: @foto.png va como bloque image y el agente puede leer imágenes por el puente", async () => {
+    const { default: sharp } = await import("sharp");
+    writeFileSync(path.join(project, "foto.png"), await sharp({ create: { width: 3000, height: 1500, channels: 3, background: "#123456" } }).png().toBuffer());
+    const r = await runCli(["--url", `ws://127.0.0.1:${port}/acp`, "-p", "IMAGENES revisa @foto.png", "--yes"]);
+    assert.equal(r.code, 0, r.stderr + r.stdout);
+    assert.match(r.stdout, /^BLOQUE=text$/m);
+    assert.match(r.stdout, /^BLOQUE=image:image\/png:\d+$/m);
+    assert.doesNotMatch(r.stdout, /BLOQUE=resource_link/, "una imagen no se envía como enlace");
+    assert.match(r.stdout, /^PROMPT_TEXTO=IMAGENES revisa \[imagen adjunta: foto\.png\]$/m);
+    assert.match(r.stdout, /^TOOL=image:image\/png\|text:Imagen foto\.png \(2000×1000, reducida para el análisis\)$/m);
+    assert.match(r.stdout, /⌂ lee\s+foto\.png \(imagen 2000×1000\)/);
+  });
+
   test("doctor muestra el agente y el workspace espejo", async () => {
     const r = await runCli(["doctor", "--url", `ws://127.0.0.1:${port}/acp`]);
     assert.equal(r.code, 0, r.stderr);

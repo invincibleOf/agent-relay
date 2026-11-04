@@ -17,6 +17,7 @@ Use the tools of the "${BRIDGE_SERVER_NAME}" MCP server for every file and shell
 Choose the tool by purpose:
 - To explore or understand code, use only read, glob and grep. They run without asking the user for approval. Do not use bash for cat, head, tail, ls, find, grep, rg or wc.
 - To change files, use edit for targeted changes and write for new files or full rewrites. Do not use bash with sed, echo or redirections to modify files.
+- Images the user attaches arrive in the message itself (shown as "[imagen adjunta: …]" or "[imagen N: …]"): look at them directly and do not open them again with read. To look at other image files in the project, use read; it returns the image.
 - Use bash only to run programs: builds, tests, linters, package managers, git and the project's own scripts. Every bash call needs the user's approval, so batch related steps and avoid speculative commands.`;
 
 export type PresetName = "claude-code" | "opencode" | "none";

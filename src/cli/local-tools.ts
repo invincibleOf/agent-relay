@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { RequestError } from "@agentclientprotocol/sdk";
+import { isImagePath, loadImageFile, type ImageAttachment } from "./images.js";
 import type {
   CreateTerminalRequest,
   CreateTerminalResponse,
@@ -103,6 +104,24 @@ export class LocalTools {
     }
     this.report(req._meta, "read", this.display(abs));
     return { content };
+  }
+
+  /**
+   * Extensión `_relay/read_image`: el puente la usa cuando el agente lee una
+   * imagen. Devuelve la imagen en base64, reducida si hace falta.
+   */
+  async readImage(req: { path: string; _meta?: unknown }): Promise<ImageAttachment> {
+    const abs = this.ensureAllowed(req.path);
+    if (!isImagePath(abs)) throw RequestError.invalidParams({ path: req.path }, "No es un archivo de imagen soportado");
+    let img: ImageAttachment;
+    try {
+      img = await loadImageFile(abs);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") throw RequestError.resourceNotFound(req.path);
+      throw RequestError.invalidParams({ path: req.path }, (err as Error).message);
+    }
+    this.report(req._meta, "read", `${this.display(abs)} ${img.width ? `(imagen ${img.width}×${img.height})` : "(imagen)"}`);
+    return img;
   }
 
   async writeTextFile(req: WriteTextFileRequest): Promise<Record<string, never>> {

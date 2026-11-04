@@ -88,7 +88,12 @@ function attach(params: { cwd: string; mcpServers?: Array<{ name: string } & Rec
 const app = agent({ name: "fake-agent" })
   .onRequest(methods.agent.initialize, () => ({
     protocolVersion: PROTOCOL_VERSION,
-    agentCapabilities: { loadSession: true, mcpCapabilities: { http: true }, sessionCapabilities: { list: {}, resume: {} } },
+    agentCapabilities: {
+      loadSession: true,
+      mcpCapabilities: { http: true },
+      promptCapabilities: { image: true },
+      sessionCapabilities: { list: {}, resume: {} },
+    },
     agentInfo: { name: "fake-agent", version: "0.0.1" },
   }))
   .onRequest(methods.agent.session.new, ({ params }) => {
@@ -134,6 +139,21 @@ const app = agent({ name: "fake-agent" })
       });
 
     const promptText = params.prompt.map((b) => (b.type === "text" ? b.text : `[${b.type}:${"uri" in b ? b.uri : ""}]`)).join(" ");
+
+    if (promptText.startsWith("IMAGENES")) {
+      const lines = [`PROMPT_TEXTO=${params.prompt[0]?.type === "text" ? params.prompt[0].text : ""}`];
+      lines.push(...params.prompt.map((b) =>
+        b.type === "image" ? `BLOQUE=image:${b.mimeType}:${Buffer.from(b.data, "base64").length}` : `BLOQUE=${b.type}`,
+      ));
+      if (mcpUrl) {
+        await mcp("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "fake", version: "0" } });
+        const r = await mcp("tools/call", { name: "read", arguments: { path: "foto.png" } });
+        const c = r.content as Array<{ type: string; mimeType?: string; text?: string }>;
+        lines.push(`TOOL=${c.map((x) => (x.type === "image" ? `image:${x.mimeType}` : `text:${x.text}`)).join("|")}`);
+      }
+      await say(lines.join("\n") + "\n");
+      return { stopReason: "end_turn" };
+    }
 
     if (promptText.startsWith("MUERE")) process.exit(3); // simula que el agente se cae a mitad de turno
     if (promptText.startsWith("ECO ")) {

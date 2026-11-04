@@ -124,7 +124,10 @@ function readBody(req: IncomingMessage): Promise<string> {
 
 // ─── Herramientas ────────────────────────────────────────────────────────────
 
-type ToolResult = { content: Array<{ type: "text"; text: string }>; isError?: boolean };
+type ToolContent = { type: "text"; text: string } | { type: "image"; data: string; mimeType: string };
+type ToolResult = { content: ToolContent[]; isError?: boolean };
+
+const IMAGE_EXT = /\.(png|jpe?g|gif|webp|bmp|tiff?|avif|svg)$/i;
 const ok = (text: string): ToolResult => ({ content: [{ type: "text", text: truncate(text) }] });
 const fail = (text: string): ToolResult => ({ content: [{ type: "text", text }], isError: true });
 
@@ -159,7 +162,7 @@ export function buildMcpServer(t: BridgeTarget): McpServer {
     "read",
     {
       description:
-        "Read a text file from the user's project (no approval needed; prefer it over bash cat/head/tail). Returns lines prefixed with their line number (cat -n format). Use offset/limit for large files.",
+        "Read a file from the user's project (no approval needed; prefer it over bash cat/head/tail). Text files return lines prefixed with their line number (cat -n format); use offset/limit for large files. Images (png, jpg, gif, webp, bmp, tiff, svg) are returned as images so you can see and analyze them.",
       inputSchema: {
         path: z.string().optional().describe("Absolute path or path relative to the working directory"),
         file_path: z.string().optional().describe("Alias of path"),
@@ -170,6 +173,7 @@ export function buildMcpServer(t: BridgeTarget): McpServer {
     },
     guarded("read", async ({ path: pathArg, file_path, offset, limit }) => {
       const p = requirePath(pathArg, file_path);
+      if (IMAGE_EXT.test(p)) return io.readImage(p);
       const start = offset ?? 1;
       const { content } = await io.fs<{ content: string }>("fs/read_text_file", {
         path: io.toLocal(p),
@@ -395,6 +399,30 @@ class BridgeIO {
   /** Texto con rutas locales → rutas del espejo, para que el agente siga coherente. */
   toRemoteText(s: string): string {
     return rewritePathPrefix(s, this.t.localRoot, this.t.remoteRoot, this.t.localSep, "/");
+  }
+
+  /** Imágenes: el CLI las lee, las reduce si hace falta y las devuelve en base64. */
+  async readImage(p: string): Promise<ToolResult> {
+    const sessionId = await this.t.sessionId;
+    const local = this.toLocal(p);
+    this.t.log(`puente → _relay/read_image ${local}`);
+    try {
+      const img = await this.t.requester.request<{ data: string; mimeType: string; width?: number; height?: number; resized?: boolean }>(
+        "_relay/read_image",
+        { sessionId, path: local },
+      );
+      const dims = img.width ? `${img.width}×${img.height}` : "";
+      return {
+        content: [
+          { type: "image", data: img.data, mimeType: img.mimeType },
+          { type: "text", text: `Imagen ${p}${dims ? ` (${dims}${img.resized ? ", reducida para el análisis" : ""})` : ""}` },
+        ],
+      };
+    } catch (err) {
+      const msg = (err as Error).message;
+      if (/method not found/i.test(msg)) return fail("El CLI del usuario es anterior a v0.10 y no puede enviar imágenes; pídele que lo actualice.");
+      return fail(`Error: ${msg}`);
+    }
   }
 
   async fs<T = unknown>(method: string, params: Record<string, unknown>): Promise<T> {

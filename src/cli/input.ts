@@ -36,6 +36,24 @@ const PASTE_COLLAPSE_LINES = 4;
 const PASTE_COLLAPSE_CHARS = 800;
 /** Cada pegado resumido ocupa un carácter de uso privado en el búfer. */
 const PASTE_BASE = 0xe100;
+/** Cada adjunto (p. ej. una imagen) ocupa un carácter de otro rango de uso privado. */
+const ATTACH_BASE = 0xe800;
+
+/** Algo que se adjunta al mensaje y se muestra resumido en el campo de texto. */
+export interface Attachment<T = unknown> {
+  /** Texto que se ve en el campo, p. ej. "imagen #1 · captura.png · 1280×720". */
+  label: string;
+  /** Texto que queda en el mensaje en su lugar, p. ej. "[imagen 1: captura.png]". */
+  inline: string;
+  value: T;
+}
+
+export interface AttachmentHandlers {
+  /** Convierte lo pegado en un adjunto (p. ej. la ruta de una imagen arrastrada). */
+  fromPaste?: (text: string) => Promise<Attachment | undefined> | undefined;
+  /** Ctrl+V / Alt+V: lee un adjunto del portapapeles (p. ej. una captura). */
+  fromClipboard?: () => Promise<Attachment | undefined>;
+}
 const HISTORY_MAX = 500;
 const HISTORY_ENTRY_MAX = 20_000;
 const SHIFT_ENTER = new Set(["\x1b[13;2u", "\x1b[27;2;13~", "\x1b[13;3u", "\x1b[27;3;13~"]);
@@ -50,6 +68,9 @@ export class InputEditor {
   private chars: string[] = [];
   private cursor = 0;
   private pastes: string[] = [];
+  private attachments: Attachment[] = [];
+  private submitted: Attachment[] = [];
+  private handlers: AttachmentHandlers = {};
   private pasting: string | null = null;
   private active: { opts: ReadOptions; resolve: (s: string) => void; reject: (e: unknown) => void } | null = null;
   private cursorRow = 0;
@@ -104,6 +125,17 @@ export class InputEditor {
     this.interruptHandler = fn;
   }
 
+  setAttachmentHandlers(h: AttachmentHandlers) {
+    this.handlers = h;
+  }
+
+  /** Adjuntos que seguían en el último mensaje enviado, en orden de aparición. */
+  takeAttachments<T = unknown>(): T[] {
+    const out = this.submitted.map((a) => a.value as T);
+    this.submitted = [];
+    return out;
+  }
+
   /** Candidatos para completar con Tab cuando el texto empieza con "/". */
   setCompletions(fn: () => string[]) {
     this.completions = fn;
@@ -134,6 +166,7 @@ export class InputEditor {
     this.chars = [];
     this.cursor = 0;
     this.pastes = [];
+    this.attachments = [];
     this.historyIndex = -1;
     this.hint = "";
     this.cursorRow = 0;
@@ -174,6 +207,7 @@ export class InputEditor {
         this.chars = [];
         this.cursor = 0;
         this.pastes = [];
+        this.attachments = [];
       } else if (Date.now() - this.lastCtrlC < 1500) {
         return this.close();
       } else {
@@ -230,6 +264,11 @@ export class InputEditor {
         return this.render();
     }
 
+    if ((key.ctrl || key.meta) && key.name === "v" && this.handlers.fromClipboard) {
+      this.loadAttachment(this.handlers.fromClipboard(), "no hay una imagen en el portapapeles");
+      return this.render();
+    }
+
     if (key.ctrl) {
       switch (key.name) {
         case "a":
@@ -281,6 +320,11 @@ export class InputEditor {
   }
 
   private insertPaste(raw: string) {
+    const asAttachment = this.handlers.fromPaste?.(raw);
+    if (asAttachment) {
+      this.loadAttachment(asAttachment, undefined, raw);
+      return this.render();
+    }
     let text = raw.replace(/\r\n?/g, "\n");
     const multiline = this.active?.opts.multiline ?? false;
     if (!multiline) text = text.replace(/\n+/g, " ").trim();
@@ -292,6 +336,28 @@ export class InputEditor {
       this.insert(text);
     }
     this.render();
+  }
+
+  /** Inserta un adjunto cuando termina de cargarse; si falla, lo indica (o pega el texto original). */
+  private loadAttachment(pending: Promise<Attachment | undefined>, emptyHint?: string, fallbackText?: string) {
+    const reading = this.active;
+    this.hint = "cargando imagen…";
+    pending
+      .then((att) => {
+        if (this.active !== reading) return;
+        this.hint = "";
+        if (att) {
+          const id = this.attachments.push(att) - 1;
+          this.insert(String.fromCodePoint(ATTACH_BASE + id));
+        } else if (fallbackText !== undefined) this.insert(fallbackText);
+        else if (emptyHint) this.hint = emptyHint;
+      })
+      .catch((err: Error) => {
+        if (this.active !== reading) return;
+        this.hint = `✗ ${err.message}`;
+        if (fallbackText !== undefined) this.insert(fallbackText);
+      })
+      .finally(() => this.active === reading && this.render());
   }
 
   private deleteForward() {
@@ -389,6 +455,9 @@ export class InputEditor {
     const active = this.active!;
     const display = this.chars.join("");
     const value = this.expand(display);
+    this.submitted = this.chars
+      .map((c) => this.attachments[c.codePointAt(0)! - ATTACH_BASE])
+      .filter((a): a is Attachment => Boolean(a));
     this.hint = "";
     this.cursor = this.chars.length;
     this.render();
@@ -413,8 +482,12 @@ export class InputEditor {
   private expand(display: string): string {
     return [...display]
       .map((c) => {
-        const id = c.codePointAt(0)! - PASTE_BASE;
-        return id >= 0 && id < this.pastes.length ? this.pastes[id] : c;
+        const code = c.codePointAt(0)!;
+        const pasteId = code - PASTE_BASE;
+        if (pasteId >= 0 && pasteId < this.pastes.length) return this.pastes[pasteId];
+        const attId = code - ATTACH_BASE;
+        if (attId >= 0 && attId < this.attachments.length) return this.attachments[attId].inline;
+        return c;
       })
       .join("");
   }
@@ -435,6 +508,8 @@ export class InputEditor {
   // ─── Dibujo ────────────────────────────────────────────────────────────────
 
   private pasteLabel(c: string): string | undefined {
+    const att = this.attachments[c.codePointAt(0)! - ATTACH_BASE];
+    if (att) return this.st.accent(`[${att.label}]`);
     const id = c.codePointAt(0)! - PASTE_BASE;
     if (id < 0 || id >= this.pastes.length) return undefined;
     const text = this.pastes[id];

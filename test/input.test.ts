@@ -170,3 +170,52 @@ test("Tab completa /comandos", async () => {
   assert.equal(await p2, "/model ");
   t.stop();
 });
+
+test("pegar la ruta de una imagen la adjunta y se entrega al enviar", async () => {
+  const t = setup();
+  t.editor.setAttachmentHandlers({
+    fromPaste: (text) => (text.endsWith(".png") ? Promise.resolve({ label: "imagen #1 · a.png", inline: "[imagen 1: a.png]", value: "IMG-A" }) : undefined),
+    fromClipboard: async () => ({ label: "imagen #2 · clip.png", inline: "[imagen 2: clip.png]", value: "IMG-CLIP" }),
+  });
+  const p = t.editor.read({ prompt: "› ", multiline: true });
+  await t.type("mira ", PASTE_START + "/tmp/a.png" + PASTE_END);
+  await new Promise((r) => setTimeout(r, 10));
+  assert.match(t.screen(), /\[imagen #1 · a\.png\]/);
+  await t.type(" y ", "\x1bv"); // Alt+V: imagen del portapapeles
+  await new Promise((r) => setTimeout(r, 10));
+  await t.type("\r");
+  assert.equal(await p, "mira [imagen 1: a.png] y [imagen 2: clip.png]");
+  assert.deepEqual(t.editor.takeAttachments(), ["IMG-A", "IMG-CLIP"]);
+  assert.deepEqual(t.editor.takeAttachments(), [], "se consumen una sola vez");
+  t.stop();
+});
+
+test("borrar una imagen adjunta la quita del envío; sin imagen en el portapapeles se avisa", async () => {
+  const t = setup();
+  t.editor.setAttachmentHandlers({
+    fromPaste: () => Promise.resolve({ label: "imagen #1", inline: "[imagen 1]", value: 1 }),
+    fromClipboard: async () => undefined,
+  });
+  const p = t.editor.read({ prompt: "› ", multiline: true });
+  await t.type(PASTE_START + "x.png" + PASTE_END);
+  await new Promise((r) => setTimeout(r, 10));
+  await t.type("\x7f", "\x16"); // borra la imagen; Ctrl+V sin imagen
+  await new Promise((r) => setTimeout(r, 10));
+  assert.match(t.screen(), /no hay una imagen en el portapapeles/);
+  await t.type("ok", "\r");
+  assert.equal(await p, "ok");
+  assert.deepEqual(t.editor.takeAttachments(), []);
+  t.stop();
+});
+
+test("si cargar la imagen falla, se pega el texto original y se muestra el error", async () => {
+  const t = setup();
+  t.editor.setAttachmentHandlers({ fromPaste: () => Promise.reject(new Error("demasiado grande")) });
+  const p = t.editor.read({ prompt: "› ", multiline: true });
+  await t.type(PASTE_START + "/tmp/enorme.png" + PASTE_END);
+  await new Promise((r) => setTimeout(r, 10));
+  assert.match(t.screen(), /✗ demasiado grande/);
+  await t.type("\r");
+  assert.equal(await p, "/tmp/enorme.png");
+  t.stop();
+});

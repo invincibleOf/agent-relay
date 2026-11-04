@@ -6,6 +6,7 @@ import { createInterface, type Interface } from "node:readline/promises";
 import { parseArgs } from "node:util";
 import {
   PROTOCOL_VERSION,
+  RequestError,
   client,
   methods,
   type ClientConnection,
@@ -22,7 +23,8 @@ import { box, rows, stripAnsi, termWidth, tildify, truncate, truncateStart, visi
 import { packageVersion } from "../shared/version.js";
 import { INIT_PROMPT, expandTemplate, loadCustomCommands } from "./commands.js";
 import { configDir, defaultCliConfigPath, loadCliConfig, resolveHost, type ResolvedHost } from "./config.js";
-import { InputEditor } from "./input.js";
+import { describeImage, isImagePath, loadImageFile, pastedImagePath, prepareImage, readClipboardImage, type ImageAttachment } from "./images.js";
+import { InputEditor, type Attachment } from "./input.js";
 import { LocalTools } from "./local-tools.js";
 import { collectProjectFiles, findProjectRoot, projectId } from "./project.js";
 import { Renderer, st } from "./render.js";
@@ -164,6 +166,21 @@ async function main() {
     return fallback.question(prompt);
   };
   const ask = (q: string) => readInput(q, false, false);
+  let imageCount = 0;
+  const asAttachment = (img: ImageAttachment): Attachment<ImageAttachment> => {
+    imageCount++;
+    return { label: `imagen #${imageCount} · ${describeImage(img)}`, inline: `[imagen ${imageCount}: ${img.name}]`, value: img };
+  };
+  editor?.setAttachmentHandlers({
+    fromPaste: (text) => {
+      const p = pastedImagePath(text, process.cwd());
+      return p ? loadImageFile(p).then(asAttachment) : undefined;
+    },
+    fromClipboard: async () => {
+      const buf = await readClipboardImage();
+      return buf ? asAttachment(await prepareImage(buf, `portapapeles-${imageCount + 1}.png`)) : undefined;
+    },
+  });
   /** Avisos que pueden llegar mientras el usuario escribe (reconexión). */
   const notify = (text: string) => (editor?.reading ? editor.printAbove(text) : renderer.line(text));
 
@@ -175,6 +192,7 @@ async function main() {
     .onRequest(methods.client.terminal.waitForExit, ({ params }) => tools.waitForExit(params))
     .onRequest(methods.client.terminal.kill, ({ params }) => tools.kill(params))
     .onRequest(methods.client.terminal.release, ({ params }) => tools.release(params))
+    .onRequest("_relay/read_image", parseReadImage, ({ params }) => tools.readImage(params))
     .onRequest(methods.client.session.requestPermission, ({ params }) =>
       requestPermission(params, { autoApprove, interactive, ask, renderer }),
     )
@@ -354,7 +372,8 @@ async function main() {
     process.stderr.write(st.gray(`agent-relay v${packageVersion()} · ${live.relay.ready.provider} en ${live.relay.ready.daemon.hostname}\n`));
     if (resumeSummary.length) process.stderr.write(st.gray(`${stripAnsi(resumeSummary[0]).trim()}\n`));
     for (const w of warnings) process.stderr.write(st.yellow(`! ${w}\n`));
-    const stop = await runTurn(live.acp, session!.id, buildPrompt(values.print ?? "", process.cwd()), renderer, false);
+    const prompt = await buildPrompt(values.print ?? "", process.cwd(), [], live.init, renderer);
+    const stop = await runTurn(live.acp, session!.id, prompt, renderer, false);
     renderer.newline();
     shutdown();
     process.exitCode = stop === "error" ? 1 : 0;
@@ -506,7 +525,9 @@ async function main() {
     turnActive = true;
     try {
       const l = await getLive();
-      await runTurn(l.acp, session!.id, buildPrompt(promptText, process.cwd()), renderer, true);
+      const images = editor?.takeAttachments<ImageAttachment>() ?? [];
+      const prompt = await buildPrompt(promptText, process.cwd(), images, l.init, renderer);
+      await runTurn(l.acp, session!.id, prompt, renderer, true);
     } catch (err) {
       renderer.line(st.red(`  ✗ ${(err as Error).message}`));
     } finally {
@@ -713,6 +734,12 @@ function flattenChoices(opt: SessionConfigOption): Array<{ value: string; name: 
 
 // ─── Lógica ──────────────────────────────────────────────────────────────────
 
+function parseReadImage(params: unknown): { path: string; _meta?: unknown } {
+  const p = params as { path?: unknown; _meta?: unknown } | null;
+  if (!p || typeof p.path !== "string") throw RequestError.invalidParams(params, "falta path");
+  return { path: p.path, _meta: p._meta };
+}
+
 const RIPGREP_HINT =
   process.platform === "darwin"
     ? "Instálalo con: brew install ripgrep"
@@ -785,15 +812,47 @@ async function runTurn(acp: ClientConnection, sessionId: string, prompt: Content
   }
 }
 
-/** Convierte el texto en bloques ACP; cada @archivo existente se adjunta como resource_link. */
-function buildPrompt(text: string, cwd: string): ContentBlock[] {
+/**
+ * Convierte el mensaje en bloques ACP:
+ * - las imágenes adjuntas (pegadas, arrastradas o @imagen.png) van como bloques `image`;
+ * - cualquier otro @archivo existente va como `resource_link`.
+ */
+async function buildPrompt(
+  text: string,
+  cwd: string,
+  attached: ImageAttachment[],
+  init: InitializeResponse,
+  renderer: Renderer,
+): Promise<ContentBlock[]> {
   const blocks: ContentBlock[] = [{ type: "text", text }];
+  const images = [...attached];
+  let promptText = text;
   const seen = new Set<string>();
-  for (const m of text.matchAll(/(?:^|\s)@([^\s]+)/g)) {
-    const abs = path.resolve(cwd, m[1]);
+  for (const m of text.matchAll(/(?:^|\s)@("[^"]+"|[^\s]+)/g)) {
+    const abs = path.resolve(cwd, m[1].replace(/^"|"$/g, ""));
     if (seen.has(abs) || !existsSync(abs) || !statSync(abs).isFile()) continue;
     seen.add(abs);
+    if (isImagePath(abs)) {
+      try {
+        const img = await loadImageFile(abs);
+        images.push(img);
+        // Se nombra como adjunta para que el agente no vuelva a abrir el archivo.
+        promptText = promptText.replace(m[0], `${m[0].startsWith("@") ? "" : m[0][0]}[imagen adjunta: ${img.name}]`);
+      } catch (err) {
+        renderer.line(st.yellow(`  ! no se pudo adjuntar ${path.basename(abs)}: ${(err as Error).message}`));
+      }
+      continue;
+    }
     blocks.push({ type: "resource_link", name: path.basename(abs), uri: `file://${abs}` });
+  }
+  blocks[0] = { type: "text", text: promptText };
+  if (images.length && !init.agentCapabilities?.promptCapabilities?.image) {
+    renderer.line(st.yellow(`  ! este agente no acepta imágenes en el mensaje; se envía solo el texto`));
+    return blocks;
+  }
+  for (const img of images) {
+    blocks.push({ type: "image", mimeType: img.mimeType, data: img.data });
+    renderer.local("read", `${img.name} ${st.gray(`(imagen ${img.width ? `${img.width}×${img.height}` : ""}${img.resized ? ", reducida" : ""})`)}`);
   }
   return blocks;
 }

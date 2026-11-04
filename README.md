@@ -363,6 +363,18 @@ Comandos dentro de la sesión:
 | Shift + Enter | iTerm2, WezTerm, kitty, Ghostty y Windows Terminal recientes |
 | Ctrl + J | Todas las terminales |
 
+**Imágenes.** El modelo puede ver y analizar imágenes (capturas, diagramas, mockups, errores en pantalla) de tres formas:
+
+| Cómo | Qué haces |
+|---|---|
+| Mencionarla | `revisa @docs/mockup.png` (también rutas absolutas, aunque estén fuera del proyecto) |
+| Arrastrarla | Arrastra el archivo a la terminal: aparece como `[imagen #1 · mockup.png · 1440×900]` |
+| Pegarla | Copia una captura y pulsa **Alt+V** (o **Ctrl+V** en Terminal.app/iTerm2) |
+
+Además, el agente puede abrir por su cuenta cualquier imagen del proyecto con la herramienta `read` del puente ("revisa las capturas de `docs/`"). Las imágenes se procesan **en tu máquina** antes de enviarse: las de más de 2000 px de lado o más de ~3,7 MB se reducen (con [sharp](https://sharp.pixelplumbing.com), que se instala con agent-relay), y BMP, TIFF, AVIF y SVG se convierten a PNG. Funciona con Claude Code y OpenCode; con agentes que no aceptan imágenes, el CLI avisa y envía solo el texto.
+
+Para pegar desde el portapapeles se usa `osascript` en macOS, PowerShell en Windows y `wl-paste` o `xclip` en Linux. En Windows Terminal, Ctrl+V pega texto, así que usa **Alt+V** para imágenes.
+
 Otros atajos del campo de texto: `↑`/`↓` historial (se guarda en `~/.config/agent-relay/history.json`) o moverse entre líneas, `Tab` completa `/comandos`, `Ctrl+A`/`Ctrl+E` inicio y fin de línea, `Ctrl+W` borra una palabra, `Ctrl+U` borra hasta el inicio, `Ctrl+L` limpia la pantalla y `Ctrl+D` sale con el campo vacío.
 
 Mientras el agente trabaja, cada operación sobre tu máquina aparece como una línea `⌂` (`lee`, `escribe`, `edita`, `busca`, `lista`, `ejecuta`), y cada turno termina con su duración y el número de herramientas usadas. Las respuestas se muestran con formato Markdown. Con `NO_COLOR=1`, o si la salida no es una terminal (por ejemplo `relay -p … > respuesta.md`), el texto sale sin colores ni formato; en modo `-p` el encabezado va a stderr para que stdout quede solo con la respuesta.
@@ -467,6 +479,7 @@ src/
     ├── main.ts            # REPL, comandos, permisos, banner y doctor
     ├── input.ts           # editor de entrada: pegado multilínea, historial, atajos
     ├── sessions.ts        # listar, reanudar y resumir sesiones
+    ├── images.ts          # cargar, reducir y pegar imágenes
     ├── transport.ts       # conexión con el daemon → Stream ACP
     ├── local-tools.ts     # fs y terminales en tu máquina
     ├── project.ts         # raíz del proyecto y archivos en formato abierto
@@ -484,12 +497,13 @@ test/
 ├── e2e.test.ts            # daemon + CLI + agente falso de punta a punta
 ├── unit.test.ts
 ├── input.test.ts          # editor de entrada con una terminal simulada
+├── images.test.ts         # reducción de imágenes y rutas arrastradas
 └── markdown.test.ts       # renderizado Markdown en streaming
 ```
 
 ## Hoja de ruta
 
-1. ~~Puente MCP de herramientas locales~~ (v0.2) · ~~Preset de OpenCode~~ (v0.3) · ~~Soporte de Windows en el puente~~ (v0.7) · ~~Reanudar sesiones y reconexión automática~~ (v0.9).
+1. ~~Puente MCP de herramientas locales~~ (v0.2) · ~~Preset de OpenCode~~ (v0.3) · ~~Soporte de Windows en el puente~~ (v0.7) · ~~Reanudar sesiones y reconexión automática~~ (v0.9) · ~~Imágenes~~ (v0.10).
 2. Auditoría y políticas en el puente: registro firmado de operaciones, rutas y comandos prohibidos.
 3. Preset para Codex que desactive su shell interno.
 4. Sincronización en vivo de `AGENTS.md` y `.agents/` cuando cambian durante la sesión.
