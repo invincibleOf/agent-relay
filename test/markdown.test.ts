@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { MarkdownStream, inline } from "../src/cli/markdown.ts";
-import { makeStyles, stripAnsi } from "../src/shared/ui.ts";
+import { makeStyles, stripAnsi, visibleWidth } from "../src/shared/ui.ts";
 
 const on = makeStyles(true);
 
@@ -118,4 +118,81 @@ test("el resultado visible no depende de la fragmentación del streaming", () =>
     assert.equal(stripAnsi(out), expected, `tamaño ${size}`);
     assert.doesNotMatch(visible(out), /\*\*/);
   }
+});
+
+// ─── Tablas ──────────────────────────────────────────────────────────────────
+
+function renderW(chunks: string[], width: number) {
+  let out = "";
+  const md = new MarkdownStream(on, (s) => (out += s), () => width);
+  for (const c of chunks) md.push(c);
+  md.flush();
+  return out;
+}
+
+const TABLE = [
+  "Comparación:",
+  "",
+  "| Proveedor | Estado | Notas |",
+  "|:---|:---:|---:|",
+  "| **Claude Code** | ✅ | usa `claude-agent-acp` |",
+  "| OpenCode | ⚠️ | preset `opencode` |",
+  "",
+  "Fin.",
+  "",
+].join("\n");
+
+test("las tablas se dibujan con bordes, sin | ni ---, y con formato en las celdas", () => {
+  const out = renderW([TABLE], 80);
+  const plain = stripAnsi(out);
+  assert.match(plain, /┌─+┬─+┬─+┐/);
+  assert.match(plain, /│ Proveedor\s+│ Estado │\s+Notas │/);
+  assert.match(plain, /│ Claude Code\s+│   ✅   │ usa claude-agent-acp │/, "centrado y a la derecha según el separador");
+  assert.doesNotMatch(plain, /\|/);
+  assert.doesNotMatch(plain, /---|\*\*|`/);
+  assert.ok(out.includes(on.bold("Claude Code")) && out.includes(on.cyan("claude-agent-acp")));
+  assert.match(plain, /^Comparación:\n\n┌/);
+  assert.match(plain, /┘\n\nFin\.\n$/);
+});
+
+test("todas las filas de la tabla tienen el mismo ancho visible, también con emojis", () => {
+  const rowsOf = (out: string) => stripAnsi(out).split("\n").filter((l) => /^[┌├└│]/.test(l));
+  const lines = rowsOf(renderW([TABLE], 80));
+  assert.equal(new Set(lines.map((l) => visibleWidth(l))).size, 1, lines.join("\n"));
+});
+
+test("en una terminal angosta las celdas se ajustan sin salirse del ancho", () => {
+  const doc = "| Campo | Descripción |\n|---|---|\n| `token` | Token de 256 bits que el daemon guarda solo como hash **SHA-256** y compara en tiempo constante |\n";
+  const out = renderW([doc], 40);
+  const lines = stripAnsi(out).split("\n").filter(Boolean);
+  for (const l of lines) assert.ok(visibleWidth(l) <= 40, `${visibleWidth(l)}: ${l}`);
+  assert.ok(lines.length > 5, "la descripción ocupa varias líneas");
+  assert.match(stripAnsi(out), /SHA-256/);
+  // Los estilos se cierran al final de cada línea y se reabren en la siguiente.
+  for (const l of out.split("\n")) assert.equal((l.match(/\x1b\[1m/g) ?? []).length >= (l.match(/\x1b\[22m/g) ?? []).length - 1, true);
+});
+
+test("la tabla se ve igual sin importar cómo llegue en streaming", () => {
+  const whole = renderW([TABLE], 70);
+  assert.equal(renderW(TABLE.split(""), 70), whole);
+  for (let size = 2; size <= 9; size++) {
+    const chunks: string[] = [];
+    for (let i = 0; i < TABLE.length; i += size) chunks.push(TABLE.slice(i, i + size));
+    assert.equal(renderW(chunks, 70), whole, `tamaño ${size}`);
+  }
+});
+
+test("| dentro de `código` o escapado no separa columnas; filas incompletas se rellenan", () => {
+  const plain = stripAnsi(renderW(["| Cmd | Uso |\n|---|---|\n| `a | b` | tubería |\n| x \\| y |\n"], 60));
+  assert.match(plain, /│ a \| b\s+│ tubería │/);
+  assert.match(plain, /│ x \| y\s+│\s+│/);
+});
+
+test("sin fila separadora no es una tabla y se muestra como texto", () => {
+  assert.equal(stripAnsi(renderW(["| solo | barras |\nsigue\n"], 60)), "| solo | barras |\nsigue\n");
+});
+
+test("una tabla al final de la respuesta, sin salto de línea, se dibuja al terminar", () => {
+  const plain = stripAnsi(renderW(["| a | b |\n|---|---|\n| 1 | 2 |"], 60));
+  assert.match(plain, /│ 1 │ 2 │\n└───┴───┘\n$/);
 });

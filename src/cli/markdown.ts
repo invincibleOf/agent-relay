@@ -1,8 +1,10 @@
 import type { Styles } from "../shared/ui.js";
+import { termWidth } from "../shared/ui.js";
+import { isTableLine, renderTable } from "./table.js";
 
 /**
  * Renderiza Markdown en streaming para la terminal: encabezados, listas,
- * citas, bloques de código, `código`, **negrita**, *cursiva* y [enlaces](url).
+ * citas, bloques de código, tablas, `código`, **negrita**, *cursiva* y [enlaces](url).
  *
  * El texto se emite en cuanto es seguro (en cortes de palabra con los
  * marcadores balanceados), así que la respuesta sigue apareciendo de forma
@@ -16,9 +18,13 @@ export class MarkdownStream {
   /** La línea actual ya va en negrita (encabezado). */
   private lineBold = false;
 
+  /** Filas de una tabla en curso: se dibuja completa al terminar, cuando se conocen los anchos. */
+  private table: string[] = [];
+
   constructor(
     private st: Styles,
     private write: (s: string) => void,
+    private width: () => number = () => termWidth(),
   ) {}
 
   push(text: string) {
@@ -31,6 +37,11 @@ export class MarkdownStream {
     while ((nl = this.pending.indexOf("\n")) !== -1) {
       const line = this.pending.slice(0, nl);
       this.pending = this.pending.slice(nl + 1);
+      if (!this.inCode && !this.lineStarted && isTableLine(line)) {
+        this.table.push(line);
+        continue;
+      }
+      if (this.table.length) this.flushTable();
       this.emit(line, true);
       this.write("\n");
       this.lineStarted = false;
@@ -42,6 +53,11 @@ export class MarkdownStream {
 
   /** Vacía lo pendiente al final del turno. */
   flush() {
+    if (this.pending && !this.inCode && !this.lineStarted && isTableLine(this.pending)) {
+      this.table.push(this.pending);
+      this.pending = "";
+    }
+    if (this.table.length) this.flushTable();
     if (this.pending) this.emit(this.pending, true);
     this.pending = "";
     this.lineStarted = false;
@@ -49,9 +65,25 @@ export class MarkdownStream {
     this.lineBold = false;
   }
 
+  /** Dibuja la tabla acumulada; si no es una tabla válida, emite sus líneas como texto. */
+  private flushTable() {
+    const lines = this.table;
+    this.table = [];
+    const st = this.st;
+    const drawn = renderTable(lines, st, this.width(), (c, bold) => (bold ? st.bold(inline(c, st, true)) : inline(c, st)));
+    if (drawn) this.write(drawn.join("\n") + "\n");
+    else for (const l of lines) this.write(inline(l, st) + "\n");
+  }
+
   /** Emite lo que sea seguro de `s` y devuelve lo que queda sin emitir. */
   private emit(s: string, final: boolean): string {
     const st = this.st;
+
+    if (!this.lineStarted && !this.inCode) {
+      // Una posible fila de tabla se espera completa; otra línea cierra la tabla en curso.
+      if (!final && isTableLine(s)) return s;
+      if (!final && this.table.length && s.trim()) this.flushTable();
+    }
 
     if (!this.lineStarted) {
       // Hace falta ver el inicio de la línea para decidir su tipo.

@@ -377,7 +377,7 @@ Para pegar desde el portapapeles se usa `osascript` en macOS, PowerShell en Wind
 
 Otros atajos del campo de texto: `↑`/`↓` historial (se guarda en `~/.config/agent-relay/history.json`) o moverse entre líneas, `Tab` completa `/comandos`, `Ctrl+A`/`Ctrl+E` inicio y fin de línea, `Ctrl+W` borra una palabra, `Ctrl+U` borra hasta el inicio, `Ctrl+L` limpia la pantalla y `Ctrl+D` sale con el campo vacío.
 
-Mientras el agente trabaja, cada operación sobre tu máquina aparece como una línea `⌂` (`lee`, `escribe`, `edita`, `busca`, `lista`, `ejecuta`), y cada turno termina con su duración y el número de herramientas usadas. Las respuestas se muestran con formato Markdown. Con `NO_COLOR=1`, o si la salida no es una terminal (por ejemplo `relay -p … > respuesta.md`), el texto sale sin colores ni formato; en modo `-p` el encabezado va a stderr para que stdout quede solo con la respuesta.
+Mientras el agente trabaja, cada operación sobre tu máquina aparece como una línea `⌂` (`lee`, `escribe`, `edita`, `busca`, `lista`, `ejecuta`), y cada turno termina con su duración y el número de herramientas usadas. Las respuestas se muestran con formato Markdown, incluidas las tablas, que se dibujan con bordes, respetan la alineación de cada columna y ajustan el texto de las celdas al ancho de la terminal. Con `NO_COLOR=1`, o si la salida no es una terminal (por ejemplo `relay -p … > respuesta.md`), el texto sale sin colores ni formato; en modo `-p` el encabezado va a stderr para que stdout quede solo con la respuesta.
 
 Cualquier otro `/comando` se busca en tus comandos personalizados; si no existe, se envía al agente (por ejemplo, los comandos propios de Claude Code).
 
@@ -486,6 +486,7 @@ src/
     ├── commands.ts        # comandos personalizados y /init
     ├── render.ts          # herramientas, permisos y pie de cada turno
     ├── markdown.ts        # Markdown en streaming para la terminal
+    ├── table.ts           # tablas: anchos, alineación y ajuste de texto con estilos
     └── config.ts
 examples/
 ├── daemon.yaml, cli.yaml, commands/
